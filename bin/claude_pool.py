@@ -17,7 +17,7 @@ CLAUDE.md, which keeps its context near 4k tokens. claude-auto picks the
 account with the most room per job; exit 75 means every account is past its
 cutoff, and then the whole pool stops (exit 75) instead of waiting: a pool that
 sleeps until the 5-hour window resets spends each new window the moment it opens
-and ate a whole week of account A in a day (2026-10-12). Re-run to resume.
+and once ate an account's whole week in a day. Re-run to resume.
 Anything else that yields no answer fails the job loudly in the results file.
 Put the data in the prompt: a worker cannot read files, unless --read DIR gives it read-only
 Read/Grep/Glob over DIR (repeatable; name absolute paths in the prompt).

@@ -25,24 +25,26 @@ instead; refuse only when every account is at 100% of one.
 import json
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 HOME = Path.home()
 
 
-def accounts() -> dict[str, Path]:
+def accounts(home: Path) -> dict[str, Path]:
     """One Claude account per config dir: A is ~/.claude (the default, CLAUDE_CONFIG_DIR unset),
-    and each ~/.claude-<x> dir is account <X> (~/.claude-b is B). Logged-out dirs are kept here
-    and skipped by logged_in()."""
-    found = {"A": HOME / ".claude"}
-    for d in sorted(HOME.glob(".claude-*")):
-        if d.is_dir():
-            found[d.name.removeprefix(".claude-").upper()] = d
+    and each one-letter ~/.claude-<x> dir is account <X> (~/.claude-b is B), so a ~/.claude-b.bak
+    copy or a ~/.claude-worktrees dir is never an account. Logged-out dirs are kept here and
+    skipped by logged_in()."""
+    found = {"A": home / ".claude"}
+    for d in sorted(home.glob(".claude-?")):
+        if d.is_dir() and d.name[-1] != "a":
+            found[d.name[-1].upper()] = d
     return found
 
 
-ACCOUNTS = accounts()
+ACCOUNTS = accounts(HOME)
 # CLAUDE_AUTO_FIVE_MAX raises the 5-hour cutoff for a batch meant to spend a window to its end
 FIVE_MAX, WEEK_MAX = int(os.environ.get("CLAUDE_AUTO_FIVE_MAX", "75")), 98
 # within this many hours of an account's weekly reset its unspent week is lost anyway: use its 5-hour window
@@ -134,7 +136,7 @@ def main():
         raise SystemExit(f"claude-auto: CLAUDE_AUTO_ONLY={','.join(only)} names an unknown account")
     table = {a: usage(d, now) for a, d in ACCOUNTS.items() if logged_in(a, d) and (not only or a in only)}
     if not table:
-        raise SystemExit("claude-auto: no logged-in account (run claude-accounts-init, then /login)")
+        raise SystemExit("claude-auto: no logged-in account (run claude, then /login)")
     args = [x for x in sys.argv[1:] if x not in ("--which", "--strict")]
     # A Fable session also needs Fable-week headroom: `--model fable...` or `--model=fable...`.
     fable = any(x.startswith("--model=fable") or (x == "--model" and i + 1 < len(args) and
@@ -156,6 +158,12 @@ def main():
 
 
 def selftest():
+    with tempfile.TemporaryDirectory() as tmp:
+        home = Path(tmp)
+        for d in (".claude", ".claude-b", ".claude-c", ".claude-b.bak", ".claude-worktrees"):
+            (home / d).mkdir()
+        (home / ".claude-d").touch()  # a file, not a config dir
+        assert accounts(home) == {"A": home / ".claude", "B": home / ".claude-b", "C": home / ".claude-c"}
     now = 1_000_000.0
     t = {"A": {"five": 10, "week": 60, "week_reset": now + 24 * 3600, "seen": True},   # 40/24 = 1.67
          "B": {"five": 95, "week": 0, "week_reset": now + 100 * 3600, "seen": True},   # 5h-blocked

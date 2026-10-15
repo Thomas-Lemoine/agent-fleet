@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Read an account's rate limits and reset credits over codex app-server;
 --redeem consumes the next available "Full reset" credit (starts a fresh
-7-day window: never right before a natural reset — see the codex-reset-credits
-memory).   usage: codex_reset.py ~/.codex-b [--redeem]"""
+7-day window, so never spend one right before a natural reset).
+    usage: codex_reset.py ~/.codex-b [--redeem]"""
 import argparse, json, os, sys, uuid, types
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from codex_pool import Server

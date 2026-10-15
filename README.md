@@ -33,7 +33,7 @@ You need Python 3.11+ and the `codex` and/or `claude` CLIs. `git pull` updates e
 ## Accounts
 
 - **Codex:** `~/.codex` plus every `~/.codex-<x>` dir that holds an `auth.json`. Add one with `CODEX_HOME=~/.codex-b codex login`; on a headless box, use `codex login --device-auth`.
-- **Claude:** `~/.claude` is account A, and each `~/.claude-<x>` is account `<X>`. Add one with `CLAUDE_CONFIG_DIR=~/.claude-b claude`, then `/login`. `CLAUDE_AUTO_ONLY=B,C` limits `claude-auto` to those accounts.
+- **Claude:** `~/.claude` is account A, and each one-letter `~/.claude-<x>` is account `<X>`. Add one with `CLAUDE_CONFIG_DIR=~/.claude-b claude`, then `/login`. `CLAUDE_AUTO_ONLY=B,C` limits `claude-auto` to those accounts.
 
 `claude-auto` reads each account's usage from two files and uses the newer one:
 

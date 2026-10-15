@@ -23,18 +23,19 @@ from pathlib import Path
 HOME = Path.home()
 
 
-def accounts() -> dict[str, Path]:
+def accounts(home: Path) -> dict[str, Path]:
     """One Claude account per config dir: A is ~/.claude (the default, CLAUDE_CONFIG_DIR unset),
-    and each ~/.claude-<x> dir is account <X> (~/.claude-b is B). Logged-out dirs are kept here
-    and skipped by logged_in()."""
-    found = {"A": HOME / ".claude"}
-    for d in sorted(HOME.glob(".claude-*")):
-        if d.is_dir():
-            found[d.name.removeprefix(".claude-").upper()] = d
+    and each one-letter ~/.claude-<x> dir is account <X> (~/.claude-b is B), so a ~/.claude-b.bak
+    copy or a ~/.claude-worktrees dir is never an account. Logged-out dirs are kept here and
+    skipped by logged_in()."""
+    found = {"A": home / ".claude"}
+    for d in sorted(home.glob(".claude-?")):
+        if d.is_dir() and d.name[-1] != "a":
+            found[d.name[-1].upper()] = d
     return found
 
 
-ACCOUNTS = accounts()
+ACCOUNTS = accounts(HOME)
 
 
 def config(acct: str) -> Path:

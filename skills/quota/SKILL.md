@@ -16,7 +16,7 @@ codex-usage --porcelain
 ```
 
 - **Claude accounts:** A is `~/.claude` (CLAUDE_CONFIG_DIR unset), and each
-  `~/.claude-<x>` is account `<X>`. `echo ${CLAUDE_CONFIG_DIR:-unset}` shows
+  one-letter `~/.claude-<x>` is account `<X>`. `echo ${CLAUDE_CONFIG_DIR:-unset}` shows
   which one this session spends: unset means A. Workflow agents and
   subagents spend the session's account.
 - **Cutoffs:** don't fan out on an account at ≥75% of its 5-hour window or
