@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+"""Weekly quota for every logged-in codex account.
+
+Codex keeps one login per CODEX_HOME, so several ChatGPT subscriptions are
+several home directories. This walks them, asks each one's app-server what it
+has left, and prints it. `bin/codex` reads --porcelain to route runs.
+
+  codex-usage              # table, newest reading each time
+  codex-usage --porcelain  # "<home> <usedPercent> <resetsAt>" per account
+"""
+
+import concurrent.futures
+import datetime
+import glob
+import json
+import os
+import subprocess
+import sys
+
+WEEKLY_MINS = 10080
+# Set by bin/codex so we skip the router hop; standalone we just take PATH's.
+CODEX_BIN = os.environ.get("CODEX_BIN", "codex")
+
+
+def homes():
+    """Every codex home holding a login, default first."""
+    h = os.path.expanduser("~")
+    found = [os.path.join(h, ".codex")] + sorted(glob.glob(os.path.join(h, ".codex-*")))
+    return [p for p in found if os.path.isfile(os.path.join(p, "auth.json"))]
+
+
+def rate_limits(home):
+    """Read one account's limits over the app-server's JSON-RPC stdio channel.
+
+    Cheaper than making a real request just to read its response headers, and
+    it doesn't consume a turn. Passing CODEX_HOME explicitly also makes
+    bin/codex hand us straight to the real binary, so this can't recurse.
+    """
+    # No MCP override needed: app-server starts the configured servers when a
+    # conversation asks for tools, and a rate-limit read never opens one.
+    # Plugins are off because their startup marketplace refresh leaks a git
+    # clone into .tmp/marketplaces/.staging (openai/codex#32058), and this
+    # probe runs every few minutes per account. That leaves no children, so
+    # terminate() has nothing to leave behind.
+    proc = subprocess.Popen(
+        [CODEX_BIN, "app-server", "-c", "notify=[]", "--disable", "plugins"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        bufsize=1,
+        env=dict(os.environ, CODEX_HOME=home),
+    )
+
+    def send(obj):
+        proc.stdin.write(json.dumps(obj) + "\n")
+        proc.stdin.flush()
+
+    def reply(want):
+        for line in proc.stdout:
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                continue  # app-server also emits notifications, which have no id
+            if msg.get("id") == want:
+                return msg
+        raise RuntimeError("app-server closed before replying")
+
+    try:
+        send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+              "params": {"clientInfo": {"name": "codex-usage",
+                                        "title": "codex-usage", "version": "1"}}})
+        if reply(1).get("error"):
+            raise RuntimeError("initialize refused")
+        send({"jsonrpc": "2.0", "method": "initialized"})
+        send({"jsonrpc": "2.0", "id": 2,
+              "method": "account/rateLimits/read", "params": None})
+        msg = reply(2)
+    finally:
+        proc.terminate()
+
+    if "result" not in msg:
+        raise RuntimeError(json.dumps(msg.get("error")))
+    return msg["result"]["rateLimits"]
+
+
+def weekly(home):
+    """(usedPercent, resetsAt) for the 7-day window.
+
+    Matched on duration, never on slot name: which of primary/secondary holds
+    the weekly window moves around, and with the 5h window disabled it arrives
+    as `primary`. Keying on the name silently reads the wrong quota.
+    """
+    limits = rate_limits(home)
+    for slot in ("primary", "secondary"):
+        w = limits.get(slot)
+        if w and w.get("windowDurationMins") == WEEKLY_MINS:
+            return int(w["usedPercent"]), int(w["resetsAt"])
+    raise RuntimeError("no 7-day window in %s" % json.dumps(limits))
+
+
+def main():
+    porcelain = "--porcelain" in sys.argv[1:]
+    accounts = homes()
+    if not accounts:
+        print("no logged-in codex accounts", file=sys.stderr)
+        return 1
+
+    def read(home):
+        try:
+            return home, weekly(home), None
+        except Exception as e:  # one sick account must not blind the router
+            return home, None, e
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(accounts)) as pool:
+        results = list(pool.map(read, accounts))
+
+    rows = 0
+    for home, got, err in results:
+        if err is not None:
+            print("%s: %s" % (home, err), file=sys.stderr)
+            continue
+        used, reset = got
+        rows += 1
+        if porcelain:
+            print("%s %d %d" % (home, used, reset))
+        else:
+            when = datetime.datetime.fromtimestamp(reset).strftime("%a %b %d %H:%M")
+            print("%-28s %3d%% used   resets %s"
+                  % (home.replace(os.path.expanduser("~"), "~"), used, when))
+
+    return 0 if rows else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

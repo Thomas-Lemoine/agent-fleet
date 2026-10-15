@@ -1,0 +1,190 @@
+#!/usr/bin/env python3
+"""Launch Claude Code on whichever account has the most usage to spare; args pass through.
+
+    claude-auto [claude args...]      pick an account, exec `claude` with CLAUDE_CONFIG_DIR set
+    claude-auto --which [args...]     print the table and the pick for these args, launch nothing
+    claude-auto --strict [args...]    for lanes: exit 75 instead of falling back when every account
+                                      is past a cutoff (75% of its 5-hour window, 98% of its week)
+    claude-auto --selftest
+
+Accounts are ~/.claude (A) and every ~/.claude-<x> dir (~/.claude-b is B, ...); one counts once
+`/login` has written oauthAccount into its .claude.json. Make an extra one with
+`CLAUDE_CONFIG_DIR=~/.claude-b claude` and /login. CLAUDE_AUTO_ONLY=B,C limits the pick to those.
+Usage is the newer of the account's last-statusline.json (written by a statusline that saves its
+input there; see the README) and its usage-probe.json (claude-usage, run from cron on each
+machine), so it is at most one cron interval old whichever machine spent it. A window whose
+resets_at has passed counts as 0% used.
+
+Pick: skip accounts at >= 75% of the 5-hour window (a session there would soon be cut off) or
+>= 98% of the week, then take the highest score: weekly % left / hours until the weekly reset,
+times the share of the 5-hour window left. An account whose week resets soon with allowance
+unspent wins by a lot (that allowance is lost otherwise); a busy 5-hour window pulls it down.
+When every account is past a cutoff, take the one with the most room in its tightest limit
+instead; refuse only when every account is at 100% of one.
+"""
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+HOME = Path.home()
+
+
+def accounts() -> dict[str, Path]:
+    """One Claude account per config dir: A is ~/.claude (the default, CLAUDE_CONFIG_DIR unset),
+    and each ~/.claude-<x> dir is account <X> (~/.claude-b is B). Logged-out dirs are kept here
+    and skipped by logged_in()."""
+    found = {"A": HOME / ".claude"}
+    for d in sorted(HOME.glob(".claude-*")):
+        if d.is_dir():
+            found[d.name.removeprefix(".claude-").upper()] = d
+    return found
+
+
+ACCOUNTS = accounts()
+# CLAUDE_AUTO_FIVE_MAX raises the 5-hour cutoff for a batch meant to spend a window to its end
+FIVE_MAX, WEEK_MAX = int(os.environ.get("CLAUDE_AUTO_FIVE_MAX", "75")), 98
+# within this many hours of an account's weekly reset its unspent week is lost anyway: use its 5-hour window
+# to the end (a cut-off session costs less than the allowance that disappears at the reset)
+RESET_SOON_H, FIVE_MAX_RESET_SOON = 2, 99
+STRICT_EXIT = 75  # exit code of --strict when every account is past a cutoff
+
+
+def logged_in(acct: str, d: Path) -> bool:
+    cfg = HOME / ".claude.json" if acct == "A" else d / ".claude.json"
+    return cfg.exists() and "oauthAccount" in json.loads(cfg.read_text())
+
+
+def usage(d: Path, now: float) -> dict:
+    """{'five','week','week_reset','seen'} from the newer of the account's last statusline input
+    and its last claude-usage probe."""
+    sl, pr = d / "last-statusline.json", d / "usage-probe.json"
+    windows = {}
+    if pr.exists() and (not sl.exists() or pr.stat().st_mtime >= sl.stat().st_mtime):
+        p = json.loads(pr.read_text())
+        windows = {"five_hour": (p["five"], p["five_reset"]), "seven_day": (p["week"], p["week_reset"])}
+    elif sl.exists():
+        rl = json.loads(sl.read_text()).get("rate_limits") or {}
+        windows = {k: ((rl.get(k) or {}).get("used_percentage"), (rl.get(k) or {}).get("resets_at"))
+                   for k in ("five_hour", "seven_day")}
+
+    def window(key: str, length: float) -> tuple[float, float]:
+        used, reset = windows.get(key, (None, None))
+        if used is None or reset is None or reset <= now:
+            return 0.0, now + length
+        return float(used), float(reset)
+
+    five, _ = window("five_hour", 5 * 3600)
+    week, week_reset = window("seven_day", 7 * 86400)
+    # The Fable week (a separate cap) comes only from the probe; the statusline does not carry it.
+    p = json.loads(pr.read_text()) if pr.exists() else {}
+    fable = p.get("fable") if (p.get("fable_reset") or 0) > now else (0.0 if p.get("fable") is not None else None)
+    return {"five": five, "week": week, "week_reset": week_reset, "fable": fable, "seen": bool(windows)}
+
+
+def weekly(u: dict, fable: bool) -> float:
+    """The binding weekly %: for a Fable session, the higher of the overall and Fable weeks."""
+    return max(u["week"], u["fable"] or 0) if fable else u["week"]
+
+
+def score(u: dict, now: float, fable: bool = False) -> float:
+    """Weekly % left per hour until the weekly reset (an account resetting soon has allowance that
+    is about to be lost, so it scores high), times the share of the 5-hour window left (a session
+    started near the 5-hour cap gets cut off mid-task and loses its prompt cache)."""
+    left = (100 - weekly(u, fable)) / max((u["week_reset"] - now) / 3600, 1)
+    return left if reset_soon(u, now) else left * (1 - u["five"] / 100)
+
+
+def reset_soon(u: dict, now: float) -> bool:
+    return u["week_reset"] - now < RESET_SOON_H * 3600
+
+
+def pick(table: dict, now: float, fable: bool = False, strict: bool = False) -> str:
+    ok = [a for a, u in table.items() if weekly(u, fable) < WEEK_MAX
+          and u["five"] < (FIVE_MAX_RESET_SOON if reset_soon(u, now) else FIVE_MAX)]
+    if ok:
+        return max(ok, key=lambda a: (score(table[a], now, fable), -table[a]["five"]))
+    if strict:
+        raise SystemExit(STRICT_EXIT)
+    # Every account is past a cutoff: take the one with the most room in its tightest limit
+    # (score breaks ties), and refuse only when every account is fully spent.
+    left = {a: min(100 - u["five"], 100 - weekly(u, fable)) for a, u in table.items()}
+    usable = [a for a in table if left[a] > 0]
+    if not usable:
+        raise SystemExit("claude-auto: every account is out of usage:\n" + render(table, now))
+    return max(usable, key=lambda a: (left[a], score(table[a], now, fable)))
+
+
+def render(table: dict, now: float) -> str:
+    rows = []
+    for a, u in table.items():
+        fable = "-" if u["fable"] is None else f"{u['fable']:.0f}%"
+        rows.append(f"  {a}: 5h {u['five']:.0f}%  week {u['week']:.0f}%  Fable {fable}  "
+                    f"(resets in {(u['week_reset'] - now) / 3600:.0f} h)  score {score(u, now):.2f}"
+                    + ("" if u["seen"] else "  (no reading yet)"))
+    return "\n".join(rows)
+
+
+def main():
+    now = time.time()
+    # CLAUDE_AUTO_ONLY=C (or B,C) restricts the pick, so a batch can be pinned to the account it may spend
+    only = [x for x in os.environ.get("CLAUDE_AUTO_ONLY", "").split(",") if x]
+    if any(x not in ACCOUNTS for x in only):
+        raise SystemExit(f"claude-auto: CLAUDE_AUTO_ONLY={','.join(only)} names an unknown account")
+    table = {a: usage(d, now) for a, d in ACCOUNTS.items() if logged_in(a, d) and (not only or a in only)}
+    if not table:
+        raise SystemExit("claude-auto: no logged-in account (run claude-accounts-init, then /login)")
+    args = [x for x in sys.argv[1:] if x not in ("--which", "--strict")]
+    # A Fable session also needs Fable-week headroom: `--model fable...` or `--model=fable...`.
+    fable = any(x.startswith("--model=fable") or (x == "--model" and i + 1 < len(args) and
+                args[i + 1].startswith("fable")) for i, x in enumerate(args))
+    acct = pick(table, now, fable, strict="--strict" in sys.argv[1:])
+    if "--which" in sys.argv[1:]:
+        print(render(table, now) + f"\n-> {acct}")
+        return
+    print(f"claude-auto: account {acct}", file=sys.stderr)
+    # A is the default home, reached only with the variable unset: set to ~/.claude, Claude
+    # looks for ~/.claude/.claude.json (A's lives at ~/.claude.json) and refuses to start.
+    os.environ.pop("CLAUDE_CONFIG_DIR", None)
+    if acct != "A":
+        os.environ["CLAUDE_CONFIG_DIR"] = str(ACCOUNTS[acct])
+    # claude lives next to this script in ~/.local/bin, which a non-login shell (tmux, cron)
+    # may not have on PATH.
+    os.environ["PATH"] = f"{HOME / '.local/bin'}:{os.environ.get('PATH', '')}"
+    os.execvp("claude", ["claude", *args])
+
+
+def selftest():
+    now = 1_000_000.0
+    t = {"A": {"five": 10, "week": 60, "week_reset": now + 24 * 3600, "seen": True},   # 40/24 = 1.67
+         "B": {"five": 95, "week": 0, "week_reset": now + 100 * 3600, "seen": True},   # 5h-blocked
+         "C": {"five": 0, "week": 20, "week_reset": now + 160 * 3600, "seen": True}}   # 80/160 = 0.5
+    # A: 40/24 * 0.9 = 1.5; B is over the 5-hour cutoff
+    for u in t.values():
+        u["fable"] = None
+    assert pick(t, now) == "A", pick(t, now)
+    t["A"]["fable"] = 99  # A's Fable week is spent: a Fable session goes to C, others still to A
+    assert pick(t, now, fable=True) == "C" and pick(t, now) == "A"
+    t["A"]["week"] = 99
+    assert pick(t, now) == "C"
+    # All past a cutoff: A has 1% of its week, B 5% of its 5h, C 10% of its 5h -> C
+    t["C"]["five"] = 90
+    assert pick(t, now) == "C", pick(t, now)
+    try:
+        pick(t, now, strict=True)
+        raise AssertionError("--strict fell back")
+    except SystemExit as e:
+        assert e.code == STRICT_EXIT
+    for u in t.values():  # all spent
+        u["five"] = 100
+    try:
+        pick(t, now)
+        raise AssertionError("picked a spent account")
+    except SystemExit:
+        pass
+    print("ok")
+
+
+if __name__ == "__main__":
+    selftest() if sys.argv[1:] == ["--selftest"] else main()

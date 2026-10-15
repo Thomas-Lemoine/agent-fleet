@@ -1,0 +1,136 @@
+#!/bin/bash
+# Transparent multi-account router for codex.
+#
+# Lives at ~/.local/bin/codex, which precedes the real binary on PATH, so every
+# `codex` — typed, scripted, or fired by a subagent — lands here first. It picks
+# whichever ChatGPT account has the most weekly quota left, exports CODEX_HOME,
+# and hands over. Several subscriptions behave as one pool with nothing to type.
+#
+# An explicit CODEX_HOME skips all of it. That's the escape hatch, and it's also
+# why bin/codex-usage can probe an account without recursing back into here.
+set -euo pipefail
+
+TTL=180          # seconds a cached reading stays good
+LOCK_STALE=120   # a refresh lock older than this is treated as abandoned
+
+self="${BASH_SOURCE[0]}"
+
+# The real codex is the first on PATH that isn't this script. Compared by inode
+# (-ef) rather than by path, so it stays right through the ~/.local/bin symlink.
+real=""
+IFS=':' read -r -a _path <<<"$PATH"
+for d in "${_path[@]}"; do
+  if [ -n "$d" ] && [ -x "$d/codex" ] && ! [ "$d/codex" -ef "$self" ]; then
+    real="$d/codex"
+    break
+  fi
+done
+if [ -z "$real" ]; then
+  echo "codex router: no codex binary on PATH besides $self" >&2
+  exit 127
+fi
+
+# Every exit from this script goes through here, so CODEX_ROUTER_DEBUG=1 always
+# explains the choice — including the choices that were to not route at all.
+handoff() {
+  if [ -n "${CODEX_ROUTER_DEBUG:-}" ]; then
+    echo "codex router: $1 -> ${CODEX_HOME:-<codex default>}" >&2
+  fi
+  shift
+  exec "$real" "$@"
+}
+
+# Already aimed at an account, so don't second-guess it.
+if [ -n "${CODEX_HOME:-}" ]; then
+  handoff "CODEX_HOME already set" "$@"
+fi
+
+# Auth is per-home by definition: routing these would log you into whichever
+# account the dice picked. They get codex's own default home.
+case "${1:-}" in
+  login|logout) handoff "$1 is account-specific" "$@" ;;
+esac
+
+cache="${XDG_CACHE_HOME:-$HOME/.cache}/codex-router"
+state="$cache/weekly"
+lock="$cache/refresh.lock"
+mkdir -p "$cache"
+
+now() { date +%s; }
+mtime() { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0; }
+
+# Reading every account costs ~1s, far too much per run, so it's cached and
+# refreshed by one process at a time; everyone else uses the numbers on hand.
+refresh() {
+  if [ -d "$lock" ] && [ $(( $(now) - $(mtime "$lock") )) -gt "$LOCK_STALE" ]; then
+    rmdir "$lock" 2>/dev/null || true
+  fi
+  mkdir "$lock" 2>/dev/null || return 0
+  if CODEX_BIN="$real" "$(dirname "$self")/codex-usage" --porcelain >"$state.$$" 2>/dev/null; then
+    mv "$state.$$" "$state"
+  else
+    rm -f "$state.$$"
+  fi
+  rmdir "$lock" 2>/dev/null || true
+}
+
+if [ ! -s "$state" ]; then
+  refresh                       # nothing to fall back on, so this one waits
+  # Losing the lock race with a cold cache is the one time waiting beats going
+  # ahead: a fan-out starting from cold would otherwise stampede unrouted onto
+  # the default account, which is usually the emptiest one.
+  waited=0
+  while [ ! -s "$state" ] && [ -d "$lock" ] && [ "$waited" -lt 100 ]; do
+    sleep 0.1
+    waited=$(( waited + 1 ))
+  done
+elif [ $(( $(now) - $(mtime "$state") )) -ge "$TTL" ]; then
+  refresh >/dev/null 2>&1 &     # stale but usable: refresh behind this run
+fi
+
+_homes=(); _weights=(); _resets=(); total=0
+if [ -s "$state" ]; then
+  while read -r home used reset; do
+    [ -n "$home" ] || continue
+    rem=$(( 100 - used ))
+    if [ "$rem" -lt 0 ]; then rem=0; fi
+    _homes[${#_homes[@]}]="$home"
+    _weights[${#_weights[@]}]="$rem"
+    _resets[${#_resets[@]}]="$reset"
+    total=$(( total + rem ))
+  done < "$state"
+fi
+
+# No usable reading at all (first run, or every probe failed) — codex's default
+# home is still a working account, so get out of the way rather than guess.
+if [ ${#_homes[@]} -eq 0 ]; then
+  handoff "no usable quota reading" "$@"
+fi
+
+pick=""
+if [ "$total" -gt 0 ]; then
+  # Drawn with probability proportional to headroom: an account at 89% takes
+  # about one run in ten next to a fresh one, and an exhausted account takes
+  # none. Each process draws independently, so a 90-way fan-out splits itself
+  # in proportion without the workers having to coordinate.
+  r=$(( RANDOM % total ))
+  acc=0
+  for (( i = 0; i < ${#_homes[@]}; i++ )); do
+    acc=$(( acc + ${_weights[$i]} ))
+    if [ "$r" -lt "$acc" ]; then pick="${_homes[$i]}"; break; fi
+  done
+else
+  # Every account spent. Queue on the one that frees up first.
+  pick="${_homes[0]}"
+  soonest="${_resets[0]}"
+  for (( i = 0; i < ${#_homes[@]}; i++ )); do
+    if [ "${_resets[$i]}" -lt "$soonest" ]; then
+      soonest="${_resets[$i]}"
+      pick="${_homes[$i]}"
+    fi
+  done
+fi
+[ -n "$pick" ] || pick="${_homes[0]}"
+
+export CODEX_HOME="$pick"
+handoff "picked from ${#_homes[@]} accounts, $total% headroom pooled" "$@"

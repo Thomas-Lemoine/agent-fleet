@@ -1,0 +1,101 @@
+#!/usr/bin/env python3
+"""Usage of every logged-in Claude account (A ~/.claude, B ~/.claude-b, ...: see accounts()).
+
+    claude-usage               refresh each account, print a table
+    claude-usage --porcelain   one line per account: <acct> <5h%> <week%> <fable week%> <week resetsAt>
+
+Refreshing runs `claude -p /usage` on the account: a local command (no model call, free) that
+fetches the account's limits and caches them in its .claude.json as cachedUsageUtilization, which
+this reads. That covers every surface the account spends on (other machines, claude.ai, cloud).
+The Fable week is the `weekly_scoped` limit with model Fable: a separate cap, and Fable is refused
+at 100% while other models still run. Each reading is copied to <home>/usage-probe.json for
+claude-auto, so run this from cron every 10-30 min on each machine that spends the accounts.
+"""
+import datetime
+import json
+import os
+import subprocess
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+HOME = Path.home()
+
+
+def accounts() -> dict[str, Path]:
+    """One Claude account per config dir: A is ~/.claude (the default, CLAUDE_CONFIG_DIR unset),
+    and each ~/.claude-<x> dir is account <X> (~/.claude-b is B). Logged-out dirs are kept here
+    and skipped by logged_in()."""
+    found = {"A": HOME / ".claude"}
+    for d in sorted(HOME.glob(".claude-*")):
+        if d.is_dir():
+            found[d.name.removeprefix(".claude-").upper()] = d
+    return found
+
+
+ACCOUNTS = accounts()
+
+
+def config(acct: str) -> Path:
+    """A's .claude.json sits in $HOME (A is the default home, CLAUDE_CONFIG_DIR unset)."""
+    return HOME / ".claude.json" if acct == "A" else ACCOUNTS[acct] / ".claude.json"
+
+
+def logged_in(acct: str) -> bool:
+    return config(acct).exists() and "oauthAccount" in json.loads(config(acct).read_text())
+
+
+def epoch(iso: str | None) -> float | None:
+    return datetime.datetime.fromisoformat(iso).timestamp() if iso else None
+
+
+def refresh(acct: str) -> dict:
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CONFIG_DIR"}
+    if acct != "A":
+        env["CLAUDE_CONFIG_DIR"] = str(ACCOUNTS[acct])
+    t0 = time.time()
+    r = subprocess.run(["claude", "-p", "/usage", "--setting-sources", "project", "--strict-mcp-config",
+                        "--no-session-persistence"], env=env, capture_output=True, text=True,
+                       timeout=120, cwd=HOME, stdin=subprocess.DEVNULL)
+    c = json.loads(config(acct).read_text()).get("cachedUsageUtilization") or {}
+    # /usage reuses a recent fetch instead of refetching, so "fresh" means at most 15 min old.
+    if (c.get("fetchedAtMs") or 0) / 1000 < t0 - 900:
+        raise RuntimeError(f"account {acct}: /usage left no fetch from the last 15 min (rc {r.returncode}): "
+                           f"{(r.stdout + r.stderr).strip()[-300:]}")
+    lim = {(l["kind"], ((l.get("scope") or {}).get("model") or {}).get("display_name")): l
+           for l in c["utilization"]["limits"]}
+    five, week = lim[("session", None)], lim[("weekly_all", None)]
+    fable = lim.get(("weekly_scoped", "Fable"))  # absent on a plan without a Fable cap
+    reading = {"t": c["fetchedAtMs"] / 1000,
+               "five": five["percent"], "five_reset": epoch(five["resets_at"]),
+               "week": week["percent"], "week_reset": epoch(week["resets_at"]),
+               "fable": fable["percent"] if fable else None,
+               "fable_reset": epoch(fable["resets_at"]) if fable else None}
+    (ACCOUNTS[acct] / "usage-probe.json").write_text(json.dumps(reading) + "\n")
+    return reading
+
+
+def main():
+    accts = [a for a in ACCOUNTS if logged_in(a)]
+    with ThreadPoolExecutor(len(accts)) as ex:
+        futs = {a: ex.submit(refresh, a) for a in accts}
+    failed = False
+    for a, f in futs.items():
+        try:
+            u = f.result()
+        except Exception as e:  # one dead account must not hide the others
+            print(f"{a} FAILED {e}", file=sys.stderr)
+            failed = True
+            continue
+        fable = "-" if u["fable"] is None else f"{u['fable']:.0f}"
+        if sys.argv[1:] == ["--porcelain"]:
+            print(f"{a} {u['five']:.0f} {u['week']:.0f} {fable} {u['week_reset']:.0f}")
+        else:
+            print(f"{a}: 5h {u['five']:.0f}%  week {u['week']:.0f}%  Fable week {fable}%  "
+                  f"(resets in {(u['week_reset'] - time.time()) / 3600:.0f} h)")
+    sys.exit(1 if failed else 0)
+
+
+if __name__ == "__main__":
+    main()
