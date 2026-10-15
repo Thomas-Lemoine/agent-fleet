@@ -7,7 +7,7 @@
                                       is past a cutoff (75% of its 5-hour window, 98% of its week)
     claude-auto --selftest
 
-Accounts are ~/.claude (A) and every ~/.claude-<x> dir (~/.claude-b is B, ...); one counts once
+Accounts are ~/.claude (A) and every one-letter ~/.claude-<x> dir (~/.claude-b is B); one counts once
 `/login` has written oauthAccount into its .claude.json. Make an extra one with
 `CLAUDE_CONFIG_DIR=~/.claude-b claude` and /login. CLAUDE_AUTO_ONLY=B,C limits the pick to those.
 Usage is the newer of the account's last-statusline.json (written by a statusline that saves its
