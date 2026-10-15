@@ -3,8 +3,8 @@
 
     claude-auto [claude args...]      pick an account, exec `claude` with CLAUDE_CONFIG_DIR set
     claude-auto --which [args...]     print the table and the pick for these args, launch nothing
-    claude-auto --strict [args...]    for lanes: exit 75 instead of falling back when every account
-                                      is past a cutoff (75% of its 5-hour window, 98% of its week)
+    claude-auto --strict [args...]    for lanes: spend 5-hour windows to 98%, and exit 75 instead of
+                                      falling back when every account is past 98% of a window
     claude-auto --selftest
 
 Accounts are ~/.claude (A) and every one-letter ~/.claude-<x> dir (~/.claude-b is B); one counts once
@@ -15,8 +15,9 @@ input there; see the README) and its usage-probe.json (claude-usage, run from cr
 machine), so it is at most one cron interval old whichever machine spent it. A window whose
 resets_at has passed counts as 0% used.
 
-Pick: skip accounts at >= 75% of the 5-hour window (a session there would soon be cut off) or
->= 98% of the week, then take the highest score: weekly % left / hours until the weekly reset,
+Pick: skip accounts at >= 98% of the week, or >= 75% of the 5-hour window for an interactive
+session (it would soon be cut off; lanes and accounts within 2 h of their weekly reset go to 98%),
+then take the highest score: weekly % left / hours until the weekly reset,
 times the share of the 5-hour window left. An account whose week resets soon with allowance
 unspent wins by a lot (that allowance is lost otherwise); a busy 5-hour window pulls it down.
 When every account is past a cutoff, take the one with the most room in its tightest limit
@@ -45,11 +46,12 @@ def accounts(home: Path) -> dict[str, Path]:
 
 
 ACCOUNTS = accounts(HOME)
-# CLAUDE_AUTO_FIVE_MAX raises the 5-hour cutoff for a batch meant to spend a window to its end
-FIVE_MAX, WEEK_MAX = int(os.environ.get("CLAUDE_AUTO_FIVE_MAX", "75")), 98
-# within this many hours of an account's weekly reset its unspent week is lost anyway: use its 5-hour window
-# to the end (a cut-off session costs less than the allowance that disappears at the reset)
-RESET_SOON_H, FIVE_MAX_RESET_SOON = 2, 99
+# An interactive session started past 75% of a 5-hour window would soon be cut off mid-task, so it goes
+# elsewhere when it can (CLAUDE_AUTO_FIVE_MAX moves that line). Lanes (--strict) resume after a cut-off,
+# and within RESET_SOON_H of an account's weekly reset its unspent week is lost anyway: both spend the
+# window to FIVE_SPEND. The weekly line is the same for both.
+FIVE_MAX, FIVE_SPEND, WEEK_MAX = int(os.environ.get("CLAUDE_AUTO_FIVE_MAX", "75")), 98, 98
+RESET_SOON_H = 2
 STRICT_EXIT = 75  # exit code of --strict when every account is past a cutoff
 
 
@@ -104,7 +106,7 @@ def reset_soon(u: dict, now: float) -> bool:
 
 def pick(table: dict, now: float, fable: bool = False, strict: bool = False) -> str:
     ok = [a for a, u in table.items() if weekly(u, fable) < WEEK_MAX
-          and u["five"] < (FIVE_MAX_RESET_SOON if reset_soon(u, now) else FIVE_MAX)]
+          and u["five"] < (FIVE_SPEND if strict or reset_soon(u, now) else FIVE_MAX)]
     if ok:
         return max(ok, key=lambda a: (score(table[a], now, fable), -table[a]["five"]))
     if strict:
@@ -176,14 +178,20 @@ def selftest():
     assert pick(t, now, fable=True) == "C" and pick(t, now) == "A"
     t["A"]["week"] = 99
     assert pick(t, now) == "C"
-    # All past a cutoff: A has 1% of its week, B 5% of its 5h, C 10% of its 5h -> C
+    # All past a session's cutoff: A has 1% of its week, B 5% of its 5h, C 10% of its 5h -> C
     t["C"]["five"] = 90
     assert pick(t, now) == "C", pick(t, now)
+    # A lane still spends B and C to 98% of their 5-hour windows; A's week is gone
+    assert pick(t, now, strict=True) in ("B", "C"), pick(t, now, strict=True)
+    t["B"]["five"], t["C"]["five"] = 98, 99
     try:
         pick(t, now, strict=True)
         raise AssertionError("--strict fell back")
     except SystemExit as e:
         assert e.code == STRICT_EXIT
+    # Within 2 h of its weekly reset, an interactive session also spends a window past 75%
+    t2 = {"B": {"five": 85, "week": 79, "week_reset": now + 1.5 * 3600, "seen": True, "fable": None}}
+    assert pick(t2, now) == "B"
     for u in t.values():  # all spent
         u["five"] = 100
     try:
