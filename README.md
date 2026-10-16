@@ -66,12 +66,28 @@ claude_fleet.py prompts.jsonl --model opus --effort high --concurrency 16
 
 They read `~/.config/agent-fleet/local.md` if it exists. Put your own setup there: which model gets which task, your machines, your account names. That way the shared skills stay generic.
 
+## The Claude Code plugin
+
+`plugin/` is a Claude Code plugin, `agent-fleet`:
+
+- **The hud.** Claude and codex quota per account, this machine's cpu, memory and disk (and one remote machine's), running pools, and the session's subagents. It draws as a band above the prompt, plus a pane (docked beside the transcript in the fullscreen TUI); `/hud` toggles the pane.
+- **`agent-fleet:astra` and `agent-fleet:sol`.** Haiku subagents that run a task through `codex_ask.sh` (GPT-6 Astra, GPT-6.1 Sol). The plugin hands the caller `codex_ask.sh`'s own output in place of the relay's message, or the relay's `CODEX FAILED:` line, so a relay cannot pass off its own answer as GPT's.
+
+Run `install.sh` first: the plugin calls `codex_ask.sh` and `codex-usage` from PATH, and shows accounts with no live session from `claude-usage`'s `usage-probe.json`. Then, at a Claude Code prompt:
+
+```
+/plugin install agent-fleet --marketplace Thomas-Lemoine/agent-fleet
+```
+
+Options, set in `/config`: `remote`, an ssh host the hud shows as a second machine, and `archive`, an rclone remote whose free space it shows. To run the plugin from a checkout instead, so edits reload live, set `CLAUDE_CODE_PLUGIN_DIRS` to the `plugin` folder in the `env` block of `~/.claude/settings.json`, and the options under `pluginConfigs["agent-fleet"].options`.
+
 ## Tests
 
 ```sh
 uv run --no-project python tests/test_codex_pool.py
 uv run --no-project python tests/test_claude_fleet.py
 bin/claude-auto --selftest
+claude plugin test plugin
 ```
 
 They use fake servers and sessions, so they make no model calls.

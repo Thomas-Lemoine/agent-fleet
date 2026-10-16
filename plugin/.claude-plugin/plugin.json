@@ -1,0 +1,21 @@
+{
+  "name": "agent-fleet",
+  "version": "0.1.0",
+  "author": { "name": "Thomas Lemoine" },
+  "description": "A hud of Claude and codex quota, machines, pools and subagents, plus astra and sol: subagents that relay a GPT second opinion through codex and can't answer as themselves",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "remote": {
+      "type": "string",
+      "title": "Remote machine",
+      "description": "An ssh host (a Host in ~/.ssh/config) whose cpu, memory, disk and pools the hud shows beside this machine's. Empty: none.",
+      "default": ""
+    },
+    "archive": {
+      "type": "string",
+      "title": "Archive remote",
+      "description": "An rclone remote whose free space the hud shows (rclone about), read hourly. Empty: none.",
+      "default": ""
+    }
+  }
+}
