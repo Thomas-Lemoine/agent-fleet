@@ -1,51 +1,51 @@
+import type { On } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
 
-// The relay check on astra and sol: an answer goes through only when it carries a codex_ask.sh
-// answer the relay got back, or says CODEX FAILED; otherwise the relay is sent back, three times
-// at most.
+// The relay check on astra and sol: the caller gets codex_ask.sh's reply file in place of the
+// relay's message; without one, only a one-line CODEX FAILED goes through, and anything else is
+// sent back three times, then replaced by a CODEX FAILED line.
 
-const ANSWER = 'The bug is in parse(): it drops the last line when the input has no trailing newline.'
-const CODEX_OUT = `[codex_ask model=gpt-6.1-sol effort=high]\n${ANSWER}`
+const REPLY = '[codex_ask model=gpt-6.1-sol effort=high]\nThe bug is in parse(): it drops the last line.'
 
 // SubagentHandback is not among the typed built-in tools, so calls are spelled loosely.
 const call = (c: Record<string, unknown>) => c as never
 const spawn = (subagentType: string) => ({ subagentType, prompt: 'review parse()', description: 'review' }) as never
 
-test('a relay that hands back the codex answer, or CODEX FAILED, is let through', async ($, on) => {
-  on('agent.spawn', () => ({ model: 'haiku', agentId: 'ag1' }))
-  on('tool.call', (_$, e) => ({ result: {} as never, text: e.tool === 'Bash' ? CODEX_OUT : 'ok' }))
+/** A session where `files` exist, tool calls answer 'ok', and handbacks echo the message they
+ * reached the engine with. */
+function setup(on: On, files: Record<string, string>, ids = ['ag1']) {
+  let n = 0
+  on('agent.spawn', () => ({ model: 'haiku', agentId: ids[Math.min(n++, ids.length - 1)] }))
+  on('fs.exists', (_$, e) => ({ value: e.path in files }))
+  on('fs.read', (_$, e) => (e.path in files ? { value: files[e.path]! } : { deny: `no ${e.path}` }))
+  on('tool.call', (_$, e) => ({ result: {} as never, text: (e as unknown as { message?: string }).message ?? 'ok' }))
+}
+
+test('the caller gets the reply file, whatever the relay wrote', async ($, on) => {
+  setup(on, { '/t/d/prompt.md.reply': `${REPLY}\n` })
   await $.agent.spawn(spawn('agent-fleet:sol'))
-  await $.tool.call(call({ tool: 'Bash', command: 'codex_ask.sh gpt-6.1-sol high /tmp/d/prompt.md', agentId: 'ag1' }))
-  expect((await $.tool.call(call({ tool: 'SubagentHandback', message: CODEX_OUT, agentId: 'ag1' }))).deny).toBeUndefined()
-  expect((await $.tool.call(call({ tool: 'SubagentHandback', message: 'CODEX FAILED: codex exited 1', agentId: 'ag1' }))).deny).toBeUndefined()
+  await $.tool.call(call({ tool: 'Bash', command: "codex_ask.sh gpt-6.1-sol high '/t/d/prompt.md'", agentId: 'ag1' }))
+  const r = await $.tool.call(call({ tool: 'SubagentHandback', message: 'CODEX FAILED: timed out. My own analysis: fine.', agentId: 'ag1' }))
+  expect(r.deny).toBeUndefined()
+  expect(r.text).toBe(REPLY)
 })
 
-test('a relay that answers as itself is sent back three times, then let through', async ($, on) => {
-  on('agent.spawn', () => ({ model: 'haiku', agentId: 'ag1' }))
-  on('tool.call', (_$, e) => ({ result: {} as never, text: e.tool === 'Bash' ? CODEX_OUT : 'ok' }))
-  await $.agent.spawn(spawn('agent-fleet:sol'))
-  await $.tool.call(call({ tool: 'Bash', command: 'codex_ask.sh gpt-6.1-sol high /tmp/d/prompt.md', agentId: 'ag1' }))
-  const own = call({ tool: 'SubagentHandback', message: 'Looks fine to me: parse() handles every case.', agentId: 'ag1' })
-  for (let i = 0; i < 3; i++) expect((await $.tool.call(own)).deny).toContain('does not contain its answer')
-  expect((await $.tool.call(own)).deny).toBeUndefined()
-})
-
-test('a relay that never ran codex_ask.sh is sent back; other agents are not checked', async ($, on) => {
-  let next = 'ag1'
-  on('agent.spawn', () => ({ model: 'haiku', agentId: next }))
-  on('tool.call', () => ({ result: {} as never, text: 'ok' }))
+test('without a reply, CODEX FAILED goes through as one line and anything else is sent back', async ($, on) => {
+  setup(on, {}, ['ag1', 'ag2'])
   await $.agent.spawn(spawn('agent-fleet:astra'))
-  next = 'ag2'
   await $.agent.spawn(spawn('general-purpose'))
-  expect((await $.tool.call(call({ tool: 'SubagentHandback', message: 'My proof.', agentId: 'ag1' }))).deny).toContain('never ran codex_ask.sh')
-  expect((await $.tool.call(call({ tool: 'SubagentHandback', message: 'My proof.', agentId: 'ag2' }))).deny).toBeUndefined()
+  await $.tool.call(call({ tool: 'Bash', command: 'codex_ask.sh gpt-6-astra high /t/d/prompt.md', agentId: 'ag1' }))
+  expect((await $.tool.call(call({ tool: 'SubagentHandback', message: 'CODEX FAILED: exit 1\nHere is my take…', agentId: 'ag1' }))).text).toBe('CODEX FAILED: exit 1')
+  const own = call({ tool: 'SubagentHandback', message: 'My proof.', agentId: 'ag1' })
+  for (let i = 0; i < 3; i++) expect((await $.tool.call(own)).deny).toContain('No codex_ask.sh reply yet')
+  expect((await $.tool.call(own)).text).toStartWith('CODEX FAILED: the relay handed back its own answer')
+  expect((await $.tool.call(call({ tool: 'SubagentHandback', message: 'My proof.', agentId: 'ag2' }))).text).toBe('My proof.')
 })
 
-test('a relay that ends on its own text is blocked at SubagentStop', async ($, on) => {
-  on('agent.spawn', () => ({ model: 'haiku', agentId: 'ag1' }))
-  on('classic.SubagentStop', () => ({}))
+test('a resumed relay keeps the runs it made', async ($, on) => {
+  setup(on, { '/t/d/prompt.md.reply': REPLY })
   await $.agent.spawn(spawn('agent-fleet:sol'))
-  const stop = { agent_type: 'agent-fleet:sol', agent_id: 'ag1', agent_transcript_path: '/t/a.jsonl', stop_hook_active: false }
-  expect((await $.classic.SubagentStop({ ...stop, last_assistant_message: 'My own answer.' })).block).toContain('never ran codex_ask.sh')
-  expect((await $.classic.SubagentStop({ ...stop, last_assistant_message: 'CODEX FAILED: no codex' })).block).toBeUndefined()
+  await $.tool.call(call({ tool: 'Bash', command: 'codex_ask.sh gpt-6.1-sol high /t/d/prompt.md', agentId: 'ag1' }))
+  await $.agent.spawn(spawn('agent-fleet:sol'))
+  expect((await $.tool.call(call({ tool: 'SubagentHandback', message: 'resent', agentId: 'ag1' }))).text).toBe(REPLY)
 })

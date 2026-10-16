@@ -25,7 +25,6 @@ needs the hud, so the snapshot lists the others as `muted`. Ghostty's AppleScrip
 tab's terminals by title, and a session's title is the newest custom or AI title in its transcript.
 """
 import argparse
-import configparser
 import fcntl
 import glob
 import json
@@ -44,7 +43,7 @@ DIR = os.path.join(HOME, ".cache", "hud")
 SNAPSHOT = os.path.join(DIR, "snapshot-v3.json")
 HISTORY = 90  # samples kept per machine for the sparklines (~15 min at the 10 s TTL)
 SESSION_STALE = 120  # a session file not rewritten for this long is a session that is gone
-ARCHIVE_EVERY = 3600  # an archive's free space barely moves: one ssh `df` an hour
+ARCHIVE_EVERY = 3600  # an archive's free space barely moves: one `rclone about` an hour
 ARCHIVE_RETRY = 300  # after a failure (say, the first collection after wake, before Wi-Fi)
 CODEX_EVERY = 120  # codex-usage: one rate-limit read per account, ~1 s for four
 GHOSTTY_EVERY = 30  # splits change rarely: Ghostty's AppleScript (~0.5 s wall, 0.1 s cpu) twice a minute
@@ -114,7 +113,7 @@ def cpu_busy_linux():
 
 def memory():
     """(used %, total GB, swap used GB). macOS 'used' is 100 - memory_pressure's free
-    percentage, the number claude_mem_brake.py acts on; Linux uses MemAvailable."""
+    percentage, the number macOS itself acts on; Linux uses MemAvailable."""
     if sys.platform == "darwin":
         free = int(re.search(r"free percentage: (\d+)%", run(["memory_pressure"])).group(1))
         total = int(run(["sysctl", "-n", "hw.memsize"])) / 2**30
@@ -249,16 +248,10 @@ def sessions():
 
 
 def archive(name):
-    """Free and total GB behind the sftp rclone remote `name`, by `df` over its ssh."""
-    cfg = configparser.ConfigParser()
-    cfg.read(f"{HOME}/.config/rclone/rclone.conf")
-    if name not in cfg:
-        raise LookupError(f"no rclone remote {name!r} in ~/.config/rclone/rclone.conf")
-    a = cfg[name]
-    out = run(["ssh", "-p", a.get("port", "22"), "-i", os.path.expanduser(a["key_file"]), "-o", "BatchMode=yes",
-               "-o", "ConnectTimeout=5", f"{a['user']}@{a['host']}", "df"])
-    total, _, avail = (int(x) for x in out.splitlines()[-1].split()[1:4])
-    return {"t": time.time(), "name": name, "free": round(avail / 2**20), "total": round(total / 2**20)}
+    """Free and total GB behind the rclone remote `name` (`rclone about`; not every backend
+    reports them)."""
+    a = json.loads(run(["rclone", "about", f"{name}:", "--json"], timeout=30))
+    return {"t": time.time(), "name": name, "free": round(a["free"] / 2**30), "total": round(a["total"] / 2**30)}
 
 
 GHOSTTY = """

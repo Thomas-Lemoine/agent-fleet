@@ -37,7 +37,7 @@ const paneRev = atom({ plugin: 'agent-fleet', key: 'paneRev' } as const, 0)
 const asked = atom({ plugin: 'agent-fleet', key: 'asked' } as const, false)
 
 // Higher is worse everywhere: quota used, cpu busy, memory used. [warn, hot] per meter; the
-// 5h hot line is the fan-out cutoff (quota skill), memory's the brake's 20% free.
+// 5h hot line is the fan-out cutoff (quota skill), memory's 20% free.
 const LIMITS = { five: [50, 75], week: [85, 95], cpu: [70, 90], mem: [60, 80] } as const
 const COLOR = { bar: '#58a6ff', warn: '#d29922', hot: '#f85149', good: '#3fb950' } as const
 // Disk is free GB, lower is worse: a job writing a few GB fails under the hot line.
@@ -124,13 +124,16 @@ function bandLine(s: HudSnapshot, me: string, n: number, tier: number): Line {
       out.push({ t: `⚠ ${name}${m.disk[0] < DISK.hot ? ` disk ${m.disk[0]}G` : ''} `, c: COLOR.hot, bold: true })
     }
   }
-  if (tier === 0) out.push(dim('claude '))
-  for (const [acct, u] of Object.entries(s.claude)) {
-    out.push({ t: acct, bold: acct === me, dim: acct !== me })
-    if (tier < 3) out.push(dim(tier < 2 ? ' ' : ''), num('five', u.five), dim('·'))
-    out.push(num('week', u.week), dim(' '))
+  const claude = Object.entries(s.claude)
+  if (claude.length) {
+    if (tier === 0) out.push(dim('claude '))
+    for (const [acct, u] of claude) {
+      out.push({ t: acct, bold: acct === me, dim: acct !== me })
+      if (tier < 3) out.push(dim(tier < 2 ? ' ' : ''), num('five', u.five), dim('·'))
+      out.push(num('week', u.week), dim(' '))
+    }
+    out.pop()
   }
-  out.pop()
   const codex = Object.entries(s.codex)
   if (codex.length) {
     out.push(SEP)
@@ -592,7 +595,7 @@ async function mute($: EngineInterface, muted: boolean) {
   await update($, paneRev, n => n + 1)
 }
 
-/** Toasts a machine alert: memory past the brake line, cpu pinned for three samples, the remote
+/** Toasts a machine alert: memory past its hot line, cpu pinned for three samples, the remote
  * unreachable; each at most every TOAST_EVERY_MS. Quota needs no toast: the band colors it. */
 async function warn($: EngineInterface, s: HudSnapshot) {
   const found: Record<string, string> = {}
@@ -713,7 +716,9 @@ export const register: Register = (on, options) => {
     const home = (await $.env.get('HOME')) ?? ''
     const dir = ((await $.env.get('CLAUDE_CONFIG_DIR')) ?? '').replace(/\/$/, '')
     self.home = home
-    self.me = !dir || dir === `${home}/.claude` ? 'A' : dir.slice(-1).toUpperCase()
+    // As collect.py's claude_acct: by the home's basename, ~/.claude being A.
+    const base = (dir || '.claude').split('/').pop() ?? '.claude'
+    self.me = base === '.claude' ? 'A' : base.slice(-1).toUpperCase()
     self.sid = await $.session.id()
     self.cwd = (await $.session.cwd()).split('/').pop() ?? ''
     if (!e.isInteractive) {

@@ -70,16 +70,16 @@ They read `~/.config/agent-fleet/local.md` if it exists. Put your own setup ther
 
 `plugin/` is a Claude Code plugin, `agent-fleet`:
 
-- **The hud.** Claude and codex quota per account, this machine's cpu, memory and disk (and one remote machine's), running pools, and the session's subagents. It draws as a band above the prompt, or as a pane docked beside the transcript in a wide terminal; `/hud` toggles the pane.
-- **`agent-fleet:astra` and `agent-fleet:sol`.** Haiku subagents that run a task through `codex_ask.sh` (GPT-6 Astra, GPT-6.1 Sol) and relay the answer. The plugin turns back a relay's answer that is not a `codex_ask.sh` answer it got, so a relay cannot pass off its own answer as GPT's.
+- **The hud.** Claude and codex quota per account, this machine's cpu, memory and disk (and one remote machine's), running pools, and the session's subagents. It draws as a band above the prompt, plus a pane (docked beside the transcript in the fullscreen TUI); `/hud` toggles the pane.
+- **`agent-fleet:astra` and `agent-fleet:sol`.** Haiku subagents that run a task through `codex_ask.sh` (GPT-6 Astra, GPT-6.1 Sol). The plugin hands the caller `codex_ask.sh`'s own output in place of the relay's message, or the relay's `CODEX FAILED:` line, so a relay cannot pass off its own answer as GPT's.
 
-Run `install.sh` first: the plugin calls `codex_ask.sh`, `claude-usage` and `codex-usage` from PATH. Then, at a Claude Code prompt:
+Run `install.sh` first: the plugin calls `codex_ask.sh` and `codex-usage` from PATH, and shows accounts with no live session from `claude-usage`'s `usage-probe.json`. Then, at a Claude Code prompt:
 
 ```
 /plugin install agent-fleet --marketplace Thomas-Lemoine/agent-fleet
 ```
 
-Options, set in `/config`: `remote`, an ssh host the hud shows as a second machine, and `archive`, an sftp rclone remote whose free space it shows. To run the plugin from a checkout instead, so edits reload live, set `CLAUDE_CODE_PLUGIN_DIRS` to the `plugin` folder in the `env` block of `~/.claude/settings.json`, and the options under `pluginConfigs["agent-fleet"].options`.
+Options, set in `/config`: `remote`, an ssh host the hud shows as a second machine, and `archive`, an rclone remote whose free space it shows. To run the plugin from a checkout instead, so edits reload live, set `CLAUDE_CODE_PLUGIN_DIRS` to the `plugin` folder in the `env` block of `~/.claude/settings.json`, and the options under `pluginConfigs["agent-fleet"].options`.
 
 ## Tests
 

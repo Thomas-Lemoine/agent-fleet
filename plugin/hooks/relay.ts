@@ -1,96 +1,71 @@
-import type { EngineInterface, On } from 'claude-code'
+import type { On } from 'claude-code'
 
-// The relay agents (agents/astra.md, agents/sol.md) run a task through `codex_ask.sh` and must
-// answer with its stdout, relayed verbatim, or with a `CODEX FAILED:` line. A Haiku relay that
-// answers the task itself and labels it as the GPT model's is the failure this catches.
+// The relay agents (agents/astra.md, agents/sol.md) run a task through `codex_ask.sh` and hand
+// back what it printed. A Haiku relay that answers the task itself and labels it as the GPT
+// model's is the failure this prevents, so the relay's own words never reach its caller:
 //
-// Each relay is followed from its spawn: whether it ran codex_ask.sh, and every `[codex_ask …]`
-// result it got back (a Bash result, or TaskOutput's when the call went to the background). Its
-// answer is checked where it is given: a SubagentHandback call (how a subagent reports where that
-// tool exists) is denied, so the relay reads why and goes on; a final text message is blocked at
-// SubagentStop, which re-prompts it. (A SubagentStop block after a SubagentHandback is discarded:
-// the turn ended on a tool result.) At most MAX_BLOCKS times per relay, so a stubborn one cannot
-// loop. A relay whose spawn this load did not see (a hot reload mid-run) is let through: with
-// its history unknown, a deny would be a guess.
+// - Every `codex_ask.sh MODEL EFFORT PROMPT_FILE` a relay runs is noted. On success the script
+//   leaves its exact stdout in PROMPT_FILE.reply.
+// - At the relay's SubagentHandback (how a subagent reports), the caller gets those reply files
+//   in place of the relay's message. That holds however the relay waited (a run past the Bash
+//   timeout moves to the background) and however much of a long output it read.
+// - With no reply file, a `CODEX FAILED:` message goes through as its first line alone. Any
+//   other message is denied, so the relay reads why and goes on; after MAX_BLOCKS denies the
+//   caller gets a CODEX FAILED line saying so.
+//
+// A relay that ends on text is sent back to SubagentHandback by the engine itself. A relay whose
+// spawn this load did not see (a hot reload mid-run) is let through: with its history unknown, a
+// deny would be a guess.
 
 const RELAY = /^agent-fleet:(astra|sol)$/
 const MAX_BLOCKS = 3
-const HEAD = 120 // chars of the codex answer that must appear in the relay's answer
+// The PROMPT_FILE argument of a codex_ask.sh call, quoted or bare.
+const PROMPT_ARG = /codex_ask\.sh\s+\S+\s+\S+\s+(?:'([^']+)'|"([^"]+)"|([^\s;&|)]+))/g
 
-type Relay = { asked: boolean; answers: string[]; blocks: number }
+type Relay = { prompts: Set<string>; blocks: number }
 
 // Per load, by agent id.
 const relays = new Map<string, Relay>()
-
-const norm = (s: string) => s.replace(/\s+/g, ' ').trim()
-
-/** Why `answer` is not a relayed codex_ask.sh answer, or null when it is. */
-function verdict(r: Relay, answer: string): string | null {
-  const said = norm(answer)
-  if (said.startsWith('CODEX FAILED:')) return null
-  if (!r.asked) return "You never ran codex_ask.sh, so this cannot be the model's answer."
-  if (!r.answers.length) return "Every codex_ask.sh call failed, so this cannot be the model's answer."
-  if (r.answers.some(a => norm(a).slice(0, HEAD) && said.includes(norm(a).slice(0, HEAD)))) return null
-  return 'codex_ask.sh succeeded but your answer does not contain its answer.'
-}
-
-/** The block or deny text for a relay whose answer failed `why`, counting it; null once the
- * relay has been sent back MAX_BLOCKS times. */
-function sendBack(r: Relay, why: string | null): string | null {
-  if (why === null || r.blocks >= MAX_BLOCKS) return null
-  r.blocks += 1
-  return (
-    `${why} Reply with the codex_ask.sh stdout verbatim (starting at its \`[codex_ask ...]\` line), ` +
-    'or with exactly one line `CODEX FAILED: <what went wrong>`. Never write your own answer to the task.'
-  )
-}
-
-/** A tool result's text as the model read it; a large output is saved to a file and the result
- * only points at it. */
-async function resultText($: EngineInterface, text: string): Promise<string> {
-  const saved = /Full output saved to:\s*(\S+)/.exec(text)?.[1]
-  return saved ? (await $.fs.read(saved)).toString() : text
-}
 
 export function relayGuard(on: On) {
   // The hud holds the unmatched agent.spawn and tool.call hooks (one per event per plugin), so
   // these match on the relay's type and the tools they follow.
   on('agent.spawn', { subagentType: RELAY }, async ($, e, next) => {
     const r = await next(e)
-    if (r.deny === undefined && r.agentId) relays.set(r.agentId, { asked: false, answers: [], blocks: 0 })
+    // A resume (SendMessage) spawns the same id again; it keeps what the relay ran.
+    if (r.deny === undefined && r.agentId && !relays.has(r.agentId)) relays.set(r.agentId, { prompts: new Set(), blocks: 0 })
     return r
+  })
+
+  on('tool.call', { tool: /^Bash$/ }, async ($, e, next) => {
+    const r = e.agentId ? relays.get(e.agentId) : undefined
+    const command = (e as unknown as { command?: unknown }).command
+    if (r && typeof command === 'string') {
+      for (const m of command.matchAll(PROMPT_ARG)) {
+        const p = m[1] ?? m[2] ?? m[3]
+        if (p) r.prompts.add(p)
+      }
+    }
+    return next(e)
   })
 
   on('tool.call', { tool: /^SubagentHandback$/ }, async ($, e, next) => {
     const r = e.agentId ? relays.get(e.agentId) : undefined
     if (!r) return next(e)
-    const message = (e as unknown as { message?: unknown }).message
-    const deny = sendBack(r, verdict(r, typeof message === 'string' ? message : ''))
-    return deny === null ? next(e) : { deny }
-  })
-
-  on('tool.call', { tool: /^(Bash|TaskOutput)$/ }, async ($, e, next) => {
-    const r = e.agentId ? relays.get(e.agentId) : undefined
-    if (!r) return next(e)
-    const command = (e as unknown as { command?: unknown }).command
-    if (typeof command === 'string' && command.includes('codex_ask.sh')) r.asked = true
-    const res = await next(e)
-    if (typeof res.text === 'string') {
-      const text = (await resultText($, res.text)).trimStart()
-      if (text.startsWith('[codex_ask ')) r.answers.push(text.includes('\n') ? text.slice(text.indexOf('\n') + 1) : '')
+    const replies: string[] = []
+    for (const p of r.prompts) if (await $.fs.exists(`${p}.reply`)) replies.push((await $.fs.read(`${p}.reply`)).toString().trimEnd())
+    const hand = (message: string) => next({ ...e, message } as typeof e)
+    if (replies.length) return hand(replies.join('\n\n'))
+    const said = (e as unknown as { message?: unknown }).message
+    const first = typeof said === 'string' ? (said.trim().split('\n')[0] ?? '') : ''
+    if (first.startsWith('CODEX FAILED:')) return hand(first)
+    if (r.blocks >= MAX_BLOCKS) return hand(`CODEX FAILED: the relay handed back its own answer ${MAX_BLOCKS + 1} times without a codex_ask.sh reply.`)
+    r.blocks += 1
+    return {
+      deny:
+        'No codex_ask.sh reply yet, and your own answer is never passed on. Run `codex_ask.sh MODEL EFFORT PROMPT_FILE` ' +
+        'with the prompt file\'s full path and let it finish (a run moved to the background ends with a notification), ' +
+        'then hand back its stdout. If it failed, hand back one line: `CODEX FAILED: <what went wrong>`.',
     }
-    return res
-  })
-
-  on('classic.SubagentStop', async ($, e, next) => {
-    const r = relays.get(e.agent_id)
-    if (!r) return next(e)
-    // Ended on a tool (its SubagentHandback, judged above): nothing left to judge.
-    const block = e.last_assistant_message ? sendBack(r, verdict(r, e.last_assistant_message)) : null
-    if (block === null) {
-      relays.delete(e.agent_id)
-      return next(e)
-    }
-    return { ...(await next(e)), block }
   })
 }

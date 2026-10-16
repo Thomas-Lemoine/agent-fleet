@@ -17,14 +17,17 @@
 # stdout on failure (exit 1): `CODEX FAILED: <why>` then the last stderr lines.
 # Failure = codex never started as MODEL (header check), exited non-zero, or
 # wrote no answer. Capacity shedding ("at capacity") is retried with backoff.
-# Side files next to PROMPT_FILE: PROMPT_FILE.answer and PROMPT_FILE.stderr.
+# Side files next to PROMPT_FILE: PROMPT_FILE.answer and PROMPT_FILE.stderr, and on
+# success PROMPT_FILE.reply, exactly the stdout (the agent-fleet plugin delivers it
+# for its relay agents).
 set -u
 
 fail() { echo "CODEX FAILED: $1"; [ -n "${2:-}" ] && [ -f "$2" ] && tail -n 20 "$2"; exit 1; }
 
 [ $# -ge 3 ] && [ $# -le 5 ] || fail "usage: codex_ask.sh MODEL EFFORT PROMPT_FILE [SANDBOX] [WEB]"
 model=$1 effort=$2 prompt=$3 sandbox=${4:-read-only} web=${5:-live}
-out=$prompt.answer err=$prompt.stderr
+out=$prompt.answer err=$prompt.stderr reply=$prompt.reply
+rm -f "$reply"
 [ -s "$prompt" ] || fail "prompt file '$prompt' is missing or empty"
 command -v codex >/dev/null 2>&1 || fail "codex CLI not on PATH"
 
@@ -48,5 +51,5 @@ grep -qx "model: $model" "$err" || fail "codex did not start as $model (exit $rc
 [ "$rc" -eq 0 ] && [ -s "$out" ] || fail "codex exited $rc without an answer" "$err"
 
 tokens=$(awk '/^tokens used/{getline; print; exit}' "$err")
-echo "[codex_ask model=$model effort=$effort sandbox=$sandbox web=$web tokens=${tokens:-?}]"
-cat "$out"
+{ echo "[codex_ask model=$model effort=$effort sandbox=$sandbox web=$web tokens=${tokens:-?}]"; cat "$out"; } >"$reply"
+cat "$reply"
