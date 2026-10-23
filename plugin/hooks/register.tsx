@@ -200,7 +200,7 @@ function claudeRows(s: HudSnapshot, me: string, w: number): Line[] {
     [
       { t: 'Claude', bold: true },
       dim(
-        `${'5h'.padStart(bw + 2)}${'week'.padStart(bw + 6)}${resets ? `${'⟳5h'.padStart(8)}${'⟳wk'.padStart(7)}` : ''}${fable ? '  fable' : ''}`,
+        `${'5h'.padStart(bw + 2)}${'week'.padStart(bw + 6)}${resets ? `${'↻5h'.padStart(8)}${'↻wk'.padStart(7)}` : ''}${fable ? '  fable' : ''}`,
       ),
     ],
   ]
@@ -233,7 +233,7 @@ function codexRows(s: HudSnapshot, w: number): Line[] {
 function codexQuota(s: HudSnapshot, w: number): Line[] {
   const codex = Object.entries(s.codex)
   if (!codex.length) return []
-  const reset = dim(`  ⟳ ${resetIn(Math.min(...codex.map(([, u]) => u.week_reset)), Date.now())}`)
+  const reset = dim(`  ↻ ${resetIn(Math.min(...codex.map(([, u]) => u.week_reset)), Date.now())}`)
   // Row: `Codex ` 6, per account `a ` + bar + 4-wide number + 2, the reset ~9.
   const mb = clamp((w - 15 - 8 * codex.length) / codex.length, 0, 8)
   if (mb < 3) {
@@ -267,7 +267,7 @@ function machineRows(s: HudSnapshot, w: number, tier: Tier): Line[] {
     const cells: Line[] = machines.map(([name, m]) =>
       isUp(m)
         ? [{ t: `${name} `, bold: true }, dim('cpu '), num('cpu', m.cpu), dim(' mem '), num('mem', m.mem), dim(' disk '), diskSpan(m.disk[0])]
-        : [{ t: `${name} `, bold: true }, { t: '✕ unreachable', c: COLOR.hot }],
+        : [{ t: `${name} `, bold: true }, { t: '✕ no reading', c: COLOR.hot }],
     )
     const joined = cells.flatMap((c, i) => (i ? [dim('   '), ...c] : c))
     return width(joined) <= w ? [joined] : cells
@@ -278,7 +278,8 @@ function machineRows(s: HudSnapshot, w: number, tier: Tier): Line[] {
   const out: Line[] = []
   for (const [name, m] of machines) {
     if (!isUp(m)) {
-      out.push([name5(name), { t: `unreachable: ${m.error}`, c: COLOR.hot }])
+      // The remote's ssh failing, or this machine's own reading (a stalled ps): the error says which.
+      out.push([name5(name), { t: `✕ ${m.error}`, c: COLOR.hot }])
       continue
     }
     const hist = s.hist[name] ?? []
@@ -601,7 +602,7 @@ async function warn($: EngineInterface, s: HudSnapshot) {
   const found: Record<string, string> = {}
   for (const [name, m] of Object.entries(s.machines)) {
     if (!isUp(m)) {
-      found[`${name}:down`] = `${name} unreachable: ${m.error}`
+      found[`${name}:down`] = `${name}: ${m.error}`
       continue
     }
     if (m.mem >= LIMITS.mem[1]) found[`${name}:mem`] = `${name} memory ${Math.round(m.mem)}% used`
@@ -665,8 +666,9 @@ async function reconcile($: EngineInterface) {
   }
 }
 
-/** Runs collect.py once (it waits out another session's run, then finds its snapshot fresh).
- * A failure goes to the transcript once per distinct error and slows retries to RETRY_MS. */
+/** Runs collect.py once (it leaves at once while another session's run holds the lock). A failure
+ * slows retries to RETRY_MS and goes to the transcript once per run of failures: a run that
+ * alternates two errors (a stalled machine) logged both on every retry. */
 async function collect($: EngineInterface) {
   let err = ''
   try {
@@ -680,7 +682,7 @@ async function collect($: EngineInterface) {
   } finally {
     self.collecting = false
   }
-  if (err && err !== self.lastError) $.ui.log(`hud: ${err}`)
+  if (err && !self.lastError) $.ui.log(`hud: ${err}`)
   self.lastError = err
 }
 

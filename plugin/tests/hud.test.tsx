@@ -91,7 +91,7 @@ test('the band fits its width and the pane shows every section', { timeoutMs: 30
 
   for (const surface of ['terminal', 'desktop'] as const) {
     const text = (await rowsOf(await $.ui.mount(paneAt(surface, 52, 60)))).join('\n')
-    for (const part of ['Claude', 'Codex', 'mac', 'Fan-out', '100/200', 'disk 52G', 'archive 1006G free of 1024G', 'unreachable']) {
+    for (const part of ['Claude', 'Codex', 'mac', 'Fan-out', '100/200', 'disk 52G', 'archive 1006G free of 1024G', '✕ ssh: connect to host box']) {
       expect(text).toContain(part)
     }
     expect(text).toContain('gpt-6-sol · in flight a 30 b 20') // room for each pool's detail row
