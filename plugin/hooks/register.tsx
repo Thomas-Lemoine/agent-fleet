@@ -28,6 +28,7 @@ const MAX_AGENTS = 40
 // this long is taken as done: nothing else says when those end.
 const STALE_MS = 3 * 60_000
 const RETRY_MS = 60_000 // between collector runs while it is failing
+const BUSY = 75 // collect.py's exit while another session's collector holds the lock
 const TOAST_EVERY_MS = 15 * 60_000 // one toast per alert per this long, however it flaps
 
 const snap = atom({ plugin: 'agent-fleet', key: 'snap' } as const, null, { shape: 'v3' })
@@ -105,9 +106,8 @@ const fanout = (s: HudSnapshot, mine: HudAgent[], sid: string) => {
   let n = mine.filter(a => a.status === 'running').length
   for (const b of s.sessions) if (b.id !== sid) n += b.running
   for (const m of Object.values(s.machines)) {
-    if (!isUp(m)) continue
-    for (const a of Object.values(m.claude)) n += a.headless
-    for (const p of m.pools) n += poolInflight(p)
+    for (const p of m.pools ?? []) n += poolInflight(p)
+    if (isUp(m)) for (const a of Object.values(m.claude)) n += a.headless
   }
   return n
 }
@@ -362,7 +362,7 @@ function poolRow(p: PoolOn, local: string, w: number): Line {
  * rows do not all fit in `room`, shows the pools that do and folds the rest into one row. */
 function fanoutRows(s: HudSnapshot, mine: HudAgent[], sid: string, w: number, tier: Tier, room: number): Line[] {
   const local = Object.keys(s.machines)[0] ?? ''
-  const pools: PoolOn[] = Object.entries(s.machines).flatMap(([on, m]) => (isUp(m) ? m.pools.map(p => ({ ...p, on })) : []))
+  const pools: PoolOn[] = Object.entries(s.machines).flatMap(([on, m]) => (m.pools ?? []).map(p => ({ ...p, on })))
   const headless = Object.values(s.machines)
     .filter(isUp)
     .flatMap(m => Object.entries(m.claude))
@@ -556,6 +556,8 @@ const self = {
   collectArgs: [] as string[],
   /** This account's rate limits as this session last measured them, carried in its beat. */
   limits: null as HudLimits | null,
+  /** The collector errors logged since its last success. */
+  logged: new Set<string>(),
 }
 // Spreads the sessions' collector runs so the first one's fresh snapshot stops the rest. Drawn
 // anew each tick, so every session gets turns: only one Ghostty launched reads Ghostty's tabs.
@@ -596,8 +598,8 @@ async function mute($: EngineInterface, muted: boolean) {
   await update($, paneRev, n => n + 1)
 }
 
-/** Toasts a machine alert: memory past its hot line, cpu pinned for three samples, the remote
- * unreachable; each at most every TOAST_EVERY_MS. Quota needs no toast: the band colors it. */
+/** Toasts a machine alert: memory past its hot line, cpu pinned for three samples, a machine
+ * with no reading; each at most every TOAST_EVERY_MS. Quota needs no toast: the band colors it. */
 async function warn($: EngineInterface, s: HudSnapshot) {
   const found: Record<string, string> = {}
   for (const [name, m] of Object.entries(s.machines)) {
@@ -666,9 +668,9 @@ async function reconcile($: EngineInterface) {
   }
 }
 
-/** Runs collect.py once (it leaves at once while another session's run holds the lock). A failure
- * slows retries to RETRY_MS and goes to the transcript once per run of failures: a run that
- * alternates two errors (a stalled machine) logged both on every retry. */
+/** Runs collect.py once (it exits BUSY at once while another session's run holds the lock). A
+ * failure slows retries to RETRY_MS and goes to the transcript once per distinct error per run
+ * of failures: a stalled machine alternates two errors, which logged both on every retry. */
 async function collect($: EngineInterface) {
   let err = ''
   try {
@@ -676,13 +678,18 @@ async function collect($: EngineInterface) {
       ['python3', `${$.plugin.root}/collect.py`, '--ttl', String(TTL_MS / 1000 - 2), ...self.collectArgs],
       { timeoutMs: 60_000 },
     )
+    if (r.exitCode === BUSY) return // no news either way
     if (r.exitCode !== 0) err = `collect.py failed: ${r.stderr.trim().split('\n').pop() ?? `exit ${r.exitCode}`}`
   } catch (e) {
     err = `collect.py did not run: ${String(e)}`
   } finally {
     self.collecting = false
   }
-  if (err && !self.lastError) $.ui.log(`hud: ${err}`)
+  if (!err) self.logged.clear()
+  else if (!self.logged.has(err)) {
+    self.logged.add(err)
+    $.ui.log(`hud: ${err}`)
+  }
   self.lastError = err
 }
 

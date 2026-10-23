@@ -37,7 +37,9 @@ export type HudMachineStats = {
   pools: HudPool[]
 }
 
-export type HudMachine = HudMachineStats | { error: string }
+/** A machine with no reading: the remote's ssh failed, or this machine's own reading did (its
+ * pools are still read, as they need no ps). */
+export type HudMachine = HudMachineStats | { error: string; pools?: HudPool[] }
 
 /** One account's 5-hour and weekly windows: used %, and resets as epoch s (null while a window
  * has not started). */

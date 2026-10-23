@@ -133,3 +133,34 @@ test('a session the snapshot mutes (another in its Ghostty tab shows the hud) dr
   expect(text).toBe('engine') // the hook stood aside for the engine's own band
   await view.unmount()
 })
+
+test('a stalled local reading shows its error and keeps the pools it read without ps', async ($, on) => {
+  mock.env(on, { HOME: '/h' })
+  mock.store(on)
+  const clock = mock.clock(on, { now: Date.now() })
+  on('command.register', () => ({ value: { command: 'hud' } }))
+  on('ui.panes', () => ({ value: [] }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  on('session.id', () => ({ value: 'sid-1' }))
+  on('session.cwd', () => ({ value: '/h/dotfiles' }))
+  on('settings.read', () => ({ value: {} }))
+  on('fs.stat', () => ({ value: { kind: 'file', size: 1, mtimeMs: Date.now(), isLink: false } }))
+  const mac = SNAP.machines.mac
+  if (!mac || 'error' in mac) throw new Error('the fixture mac has a reading')
+  const stalled = { ...SNAP, machines: { ...SNAP.machines, mac: { error: 'RuntimeError: ps timed out after 10s', pools: mac.pools } } }
+  on('fs.read', () => ({ value: JSON.stringify(stalled) }))
+  on('fs.write', () => ({ value: undefined }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  await $.session.start({ cwd: '/h/dotfiles', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+
+  const view = await $.ui.mount(band(200))
+  const text = (await view.findAll({ type: 'Text' })).map(t => t.text).join('')
+  expect(text).toContain('mac ✕')
+  expect(text).toContain('⇶ 54 agents') // both pools; the 6 headless runs needed ps
+  await view.unmount()
+
+  const pane = (await rowsOf(await $.ui.mount(paneAt('terminal', 52, 60)))).join('\n')
+  for (const part of ['✕ RuntimeError: ps timed out after 10s', '100/200', 'Claude']) expect(pane).toContain(part)
+})

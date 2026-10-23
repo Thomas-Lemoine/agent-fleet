@@ -50,6 +50,7 @@ CODEX_EVERY = 120  # codex-usage: one rate-limit read per account, ~1 s for four
 GHOSTTY_EVERY = 30  # splits change rarely: Ghostty's AppleScript (~0.5 s wall, 0.1 s cpu) twice a minute
 GHOSTTY_STALE = 90  # a reading older than this (no Ghostty collector since) mutes nothing
 LOCAL = "mac" if sys.platform == "darwin" else "local"  # this machine's name in the hud
+BUSY = 75  # exit status while another session's collector holds the lock (register.tsx's BUSY)
 
 
 def run(argv, timeout=10):
@@ -355,7 +356,8 @@ def collect(prev, remote, archive_name):
     try:
         here = machine()
     except Exception as e:  # ps stalls for a minute on a thrashing Mac: show why, write the rest
-        here = {"error": f"{type(e).__name__}: {e}"[:120]}
+        # Pool files need no ps, and a pool is often what thrashes the machine: keep showing it.
+        here = {"error": f"{type(e).__name__}: {e}"[:120], "pools": pools()}
     for th in threads:
         th.join()
     # This machine first, whichever thread finished first: readers take the first as local.
@@ -404,13 +406,13 @@ def main():
     ttl = args.ttl
     os.makedirs(DIR, exist_ok=True)
     with open(os.path.join(DIR, "collect.lock"), "w") as lock:
-        # Another session collecting: leave it to that one. Waiting queued every session behind
-        # one that a stalled machine held past the hud's 60 s limit; leaving cannot spin, as
-        # the hud runs this at most once per TTL per session.
+        # Another session collecting: leave it to that one, exiting BUSY (no news either way).
+        # Waiting queued every session behind one that a stalled machine held past the hud's
+        # 60 s limit; leaving cannot spin, as the hud runs this at most once per TTL per session.
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            return
+            sys.exit(BUSY)
         try:
             with open(SNAPSHOT) as f:
                 prev = json.load(f)
