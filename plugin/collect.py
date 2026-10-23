@@ -8,8 +8,9 @@
         print this machine's stats as one JSON line (the remote half, run over ssh)
 
 Every Claude session's hud calls this on a timer, so it must be cheap and idempotent: a flock
-lets one collector run at a time and the TTL check makes the rest exit at once, so N sessions
-cost one collection per TTL. Nothing here spends quota or starts a model. Claude usage is the
+lets one collector run at a time, and a session that finds it taken or the snapshot under the TTL
+exits at once, so N sessions cost one collection per TTL. A reading that fails (a stalled ps)
+still writes the snapshot, with the error in its place. Nothing here spends quota or starts a model. Claude usage is the
 newest of the rate limits each live session's hud measures (in its session file) and the
 usage-probe.json that agent-fleet's claude-usage leaves; codex usage is agent-fleet's
 codex-usage, read every CODEX_EVERY. The remote half is this same file piped to `python3 -`
@@ -49,11 +50,16 @@ CODEX_EVERY = 120  # codex-usage: one rate-limit read per account, ~1 s for four
 GHOSTTY_EVERY = 30  # splits change rarely: Ghostty's AppleScript (~0.5 s wall, 0.1 s cpu) twice a minute
 GHOSTTY_STALE = 90  # a reading older than this (no Ghostty collector since) mutes nothing
 LOCAL = "mac" if sys.platform == "darwin" else "local"  # this machine's name in the hud
+BUSY = 75  # exit status while another session's collector holds the lock (register.tsx's BUSY)
 
 
 def run(argv, timeout=10):
-    """argv's stdout; a non-zero exit raises with the last line of its stderr."""
-    p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    """argv's stdout; a non-zero exit raises with the last line of its stderr, a timeout with
+    one short line (the hud shows it)."""
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"{argv[0]} timed out after {timeout}s") from None
     if p.returncode != 0:
         raise RuntimeError((p.stderr.strip().splitlines() or [f"exit {p.returncode}"])[-1][:120])
     return p.stdout
@@ -347,7 +353,11 @@ def collect(prev, remote, archive_name):
     threads = [threading.Thread(target=f) for f in jobs.values()]
     for th in threads:
         th.start()
-    here = machine()
+    try:
+        here = machine()
+    except Exception as e:  # ps stalls for a minute on a thrashing Mac: show why, write the rest
+        # Pool files need no ps, and a pool is often what thrashes the machine: keep showing it.
+        here = {"error": f"{type(e).__name__}: {e}"[:120], "pools": pools()}
     for th in threads:
         th.join()
     # This machine first, whichever thread finished first: readers take the first as local.
@@ -369,9 +379,10 @@ def collect(prev, remote, archive_name):
     cpu -= sum(r.ru_utime + r.ru_stime for r in c0)
     beats = sessions()
     # A fleet's own `claude -p` beats its agents, which count instead of the process.
+    procs = here.get("claude", {})  # none when this machine's reading failed
     for b in beats:
-        if b.get("headless") and b["running"] > 0 and here["claude"].get(b["acct"], {}).get("headless"):
-            here["claude"][b["acct"]]["headless"] -= 1
+        if b.get("headless") and b["running"] > 0 and procs.get(b["acct"], {}).get("headless"):
+            procs[b["acct"]]["headless"] -= 1
     ghostty = side.get("ghostty") or prev.get("ghostty")
     fresh = ghostty and time.time() - ghostty["t"] <= GHOSTTY_STALE
     tabs = ghostty.get("tabs") if fresh else None  # a failed reading has none
@@ -395,9 +406,13 @@ def main():
     ttl = args.ttl
     os.makedirs(DIR, exist_ok=True)
     with open(os.path.join(DIR, "collect.lock"), "w") as lock:
-        # Another session collecting: wait for it, then the TTL check below finds its snapshot
-        # fresh, so a session never spins re-running while one collection is in flight.
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        # Another session collecting: leave it to that one, exiting BUSY (no news either way).
+        # Waiting queued every session behind one that a stalled machine held past the hud's
+        # 60 s limit; leaving cannot spin, as the hud runs this at most once per TTL per session.
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            sys.exit(BUSY)
         try:
             with open(SNAPSHOT) as f:
                 prev = json.load(f)
