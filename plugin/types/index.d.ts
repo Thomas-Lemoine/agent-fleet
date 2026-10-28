@@ -1,4 +1,4 @@
-// What collect.py writes to ~/.cache/hud/snapshot-v3.json, and the session's own subagents.
+// What collect.py writes to ~/.cache/hud/snapshot-v4.json, and the session's own subagents.
 
 export type HudPool = {
   pid: number
@@ -55,7 +55,9 @@ export type HudLimits = {
  * which alone has the Fable week. */
 export type HudClaudeUsage = HudLimits & { fable?: number | null }
 
-export type HudCodexUsage = { t: number; week: number; week_reset: number }
+export type HudCodexWeek = { t: number; week: number; week_reset: number }
+/** An account codex-usage could not read (a revoked login) keeps its letter, with why. */
+export type HudCodexUsage = HudCodexWeek | { t: number; error: string }
 
 /** One live Claude session's beat, written by its hud mod; a headless one only once it starts agents. */
 export type HudSessionBeat = {

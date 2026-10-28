@@ -2,7 +2,7 @@
 """One snapshot of accounts, machines and fan-outs for the agent-fleet plugin's hud.
 
     collect.py [--ttl S] [--remote HOST] [--archive REMOTE]
-        refresh ~/.cache/hud/snapshot-v3.json unless it is under S seconds old; HOST is an ssh
+        refresh ~/.cache/hud/snapshot-v4.json unless it is under S seconds old; HOST is an ssh
         host shown as a second machine, REMOTE an sftp rclone remote whose free space is shown
     collect.py --machine
         print this machine's stats as one JSON line (the remote half, run over ssh)
@@ -41,7 +41,7 @@ HOME = os.path.expanduser("~")
 DIR = os.path.join(HOME, ".cache", "hud")
 # Renamed whenever its format changes: a session that hot-reloads a new mod must never parse the
 # file an old collector wrote moments before.
-SNAPSHOT = os.path.join(DIR, "snapshot-v3.json")
+SNAPSHOT = os.path.join(DIR, "snapshot-v4.json")
 HISTORY = 90  # samples kept per machine for the sparklines (~15 min at the 10 s TTL)
 SESSION_STALE = 120  # a session file not rewritten for this long is a session that is gone
 ARCHIVE_EVERY = 3600  # an archive's free space barely moves: one `rclone about` an hour
@@ -227,11 +227,27 @@ def claude_usage(prev, beats):
 
 
 def codex_usage():
-    """The weekly window of every codex account, by agent-fleet's codex-usage (no model call)."""
-    out, now = {}, time.time()
-    for line in run(["codex-usage", "--porcelain"], timeout=30).splitlines():
+    """The weekly window of every codex account, by agent-fleet's codex-usage (no model call).
+    A logged-out account (a 401 in its `<home>: <why>` stderr line) stays in as dead instead of
+    dropping out of the hud."""
+    try:
+        p = subprocess.run(["codex-usage", "--porcelain"], capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("codex-usage timed out after 30s") from None
+    out, other, now = {}, [], time.time()
+    for line in p.stdout.splitlines():
         home, used, resets = line.split()
         out[codex_acct(home)] = {"t": now, "week": int(used), "week_reset": int(resets)}
+    for line in p.stderr.splitlines():
+        home, sep, why = line.partition(": ")
+        if sep and os.path.basename(home).startswith(".codex") and "401 Unauthorized" in why:
+            out[codex_acct(home)] = {"t": now, "error": "logged out (401)"}
+        elif line.strip():
+            other.append(line)
+    # codex-usage exits 1 when it read no account. Unless each one is logged out, that is its own
+    # failure (no network yet after a wake): raise, and the hud keeps the last readings.
+    if p.returncode != 0 and (other or not out):
+        raise RuntimeError((other or [f"exit {p.returncode}"])[-1][:120])
     return dict(sorted(out.items()))
 
 
