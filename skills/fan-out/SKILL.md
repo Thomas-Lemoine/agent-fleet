@@ -84,8 +84,9 @@ codex_pool.py prompts.jsonl --model gpt-6-astra --effort high --web cached
   everything else (timeout, server death, empty answer) is one row and you
   decide.
 - **Accounts share one queue.** A faster account takes more jobs, and an
-  account that hits its usage limit drops out and hands its jobs back (one
-  stderr line per account, with the reset time). If every account is dry
+  account that hits its usage limit or has its login revoked drops out and
+  hands its jobs back (one stderr line per account, with the reset time or
+  the login command). If every account is dry
   the leftovers stay unrecorded and count as `missing`; re-run after the
   reset.
 - **Run it in the background** and poll the results file. A 100-job Astra
