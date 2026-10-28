@@ -228,22 +228,26 @@ def claude_usage(prev, beats):
 
 def codex_usage():
     """The weekly window of every codex account, by agent-fleet's codex-usage (no model call).
-    An account it cannot read (`<home>: <why>` on its stderr) stays in with why, so a revoked
-    login shows as dead instead of dropping out of the hud."""
+    A logged-out account (a 401 in its `<home>: <why>` stderr line) stays in as dead instead of
+    dropping out of the hud."""
     try:
         p = subprocess.run(["codex-usage", "--porcelain"], capture_output=True, text=True, timeout=30)
     except subprocess.TimeoutExpired:
         raise RuntimeError("codex-usage timed out after 30s") from None
-    out, now = {}, time.time()
+    out, other, now = {}, [], time.time()
     for line in p.stdout.splitlines():
         home, used, resets = line.split()
         out[codex_acct(home)] = {"t": now, "week": int(used), "week_reset": int(resets)}
     for line in p.stderr.splitlines():
         home, sep, why = line.partition(": ")
-        if sep and os.path.basename(home).startswith(".codex"):
-            out[codex_acct(home)] = {"t": now, "error": "logged out (401)" if "401 Unauthorized" in why else why[:80]}
-    if not out:
-        raise RuntimeError((p.stderr.strip().splitlines() or [f"exit {p.returncode}"])[-1][:120])
+        if sep and os.path.basename(home).startswith(".codex") and "401 Unauthorized" in why:
+            out[codex_acct(home)] = {"t": now, "error": "logged out (401)"}
+        elif line.strip():
+            other.append(line)
+    # codex-usage exits 1 when it read no account. Unless each one is logged out, that is its own
+    # failure (no network yet after a wake): raise, and the hud keeps the last readings.
+    if p.returncode != 0 and (other or not out):
+        raise RuntimeError((other or [f"exit {p.returncode}"])[-1][:120])
     return dict(sorted(out.items()))
 
 

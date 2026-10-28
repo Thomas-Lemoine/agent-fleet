@@ -288,7 +288,7 @@ class Server:
             # A revoked login fails every turn in seconds ("workspace routing discovery
             # unauthorized (401)"), so left in, its worker would fail the queue while the
             # live accounts are still on their first turns.
-            if "unauthorized" in t["error"]["message"].lower():
+            if t["error"].get("codexErrorInfo") == "unauthorized" or "(401)" in t["error"]["message"]:
                 raise AccountDry(f"{t['error']['message']} (log in again: CODEX_HOME={self.home} codex login --device-auth)")
             return None, f"turn {t['status']}: {json.dumps(t['error'])[:300]}"
         with self.lock:
