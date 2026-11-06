@@ -66,10 +66,11 @@ def refresh(acct: str) -> dict:
                            f"{(r.stdout + r.stderr).strip()[-300:]}")
     lim = {(l["kind"], ((l.get("scope") or {}).get("model") or {}).get("display_name")): l
            for l in c["utilization"]["limits"]}
-    five, week = lim[("session", None)], lim[("weekly_all", None)]
+    week = lim[("weekly_all", None)]
+    five = lim.get(("session", None))  # absent when the account reports no 5-hour window: nothing spent against one
     fable = lim.get(("weekly_scoped", "Fable"))  # absent on a plan without a Fable cap
     reading = {"t": c["fetchedAtMs"] / 1000,
-               "five": five["percent"], "five_reset": epoch(five["resets_at"]),
+               "five": five["percent"] if five else 0, "five_reset": epoch(five["resets_at"]) if five else None,
                "week": week["percent"], "week_reset": epoch(week["resets_at"]),
                "fable": fable["percent"] if fable else None,
                "fable_reset": epoch(fable["resets_at"]) if fable else None}
