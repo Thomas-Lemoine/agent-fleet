@@ -41,7 +41,7 @@ flag it to the operator rather than routing new work by old names.
 
 | Concurrent calls | Use |
 |---|---|
-| 1–3, answer wanted in your context | `codex_ask.sh MODEL EFFORT PROMPT_FILE` from your shell tool (or a relay subagent that runs it) |
+| 1–3, answer wanted in your context | `codex_ask.sh MODEL EFFORT PROMPT_FILE` from your shell tool (or the `agent-fleet:astra`/`sol` relay, when the user asked for that model) |
 | 4–10, one-off | `codex_ask.sh` per call, backgrounded, prompts as files |
 | 10–450 independent codex prompts | `codex_pool.py` (below): one process per account, ~4.5 MB per worker |
 | 10–1000 Claude prompts, no tools or web search only | `claude_fleet.py` (Claude fleets, below): one headless Workflow session per chunk |

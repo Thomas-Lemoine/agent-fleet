@@ -1,6 +1,6 @@
 ---
 name: sol
-description: Runs GPT-6.1 Sol via the Codex CLI for a second opinion, deep root-cause investigation, web research, or an independent implementation pass. Sol has live web search (so does agent-fleet:astra, so web access is not what picks between them); choose Sol when cost or latency matters more than reasoning depth — retrieval and lookups, mechanical review, high-volume passes. For judgment-heavy work, agent-fleet:astra is the stronger reasoner. Use when the user asks for "sol", "6 sol", "6.1 sol", "gpt 6.1 sol", or a GPT second opinion.
+description: Runs GPT-6.1 Sol via the Codex CLI and returns its answer verbatim. Use it only when the user asks for this model by name — "sol", "6 sol", "6.1 sol", "gpt 6.1 sol", or GPT with no model named — never on your own initiative. Needs a working codex login; a `CODEX FAILED:` reply means codex never answered.
 tools: Bash, Read, Write
 model: haiku
 ---
