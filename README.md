@@ -58,6 +58,7 @@ claude_fleet.py prompts.jsonl --model opus --effort high --concurrency 16
 
 - **Resume:** a re-run skips ids already `ok`.
 - **Failures:** every job ends as a row, and the exit code is 1 if any failed.
+- **Fake tool calls:** a Claude row whose answer holds a tool call written out as text (`<invoke name=...>`, which never ran) also carries `"fake_tool_call": true`.
 - **Out of quota:** exit 75 means every account ran out; re-run after the reset.
 
 ## The skills
@@ -86,6 +87,7 @@ Options, set in `/config`: `remote`, an ssh host the hud shows as a second machi
 ```sh
 uv run --no-project python tests/test_codex_pool.py
 uv run --no-project python tests/test_claude_fleet.py
+uv run --no-project python tests/test_claude_pool.py
 bin/claude-auto --selftest
 claude plugin test plugin
 ```

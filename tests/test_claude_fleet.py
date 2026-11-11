@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Self-check for claude_fleet's bookkeeping: answers, failed agents, a usage limit and a session
-that runs nothing become the right rows and exit codes. A fake claude-auto on PATH stands in for
-the session, so it runs anywhere:
+"""Self-check for claude_fleet's bookkeeping: answers, failed agents, a usage limit, a session that
+runs nothing and one that leaves its run summary cut short become the right rows and exit codes,
+and the scripts a session gets stay readable. A fake claude-auto on PATH stands in for the
+session, so it runs anywhere:
 
     uv run --no-project python tests/test_claude_fleet.py
 """
@@ -15,11 +16,12 @@ claude_fleet.publish = lambda *a, **k: None  # no hud status files from tests
 # Plays a session: finds the jobs through the scripts the fleet wrote, then journals each agent.
 # Prompts: "boom" fails its agent, "noid" fails it before it starts (agentId ""), "slow" writes its
 # line in two halves across a poll, "limit" makes the account run out there (a rejected rate limit
-# event; "limit5h" a typed one, then a concurrent-request cap refusal), "spent" fails its agent with the CLI's limit message and
-# nothing else, "busy" fails it with the cap's words after the account's concurrent-request cap
-# refused a request. Afterwards a relaunch
-# answers every job again in a second journal, which the fleet must ignore. Each session logs its
-# arguments and web search budget to calls.jsonl.
+# event; "limit5h" a typed one, then a concurrent-request cap refusal), "spent" fails its agent with
+# the CLI's limit message and nothing else, "busy" fails it with the cap's words after the
+# account's concurrent-request cap refused a request, "fake" answers after a tool call written as
+# text. Afterwards a relaunch answers every job again in a second journal, which the fleet must
+# ignore, and the run summary is written (with FAKE_SUMMARY_CUT, cut inside a UTF-8 character). Each session logs its
+# arguments and web search budget to calls.jsonl, and its scripts' sizes to scripts.jsonl.
 FAKE = r'''#!/usr/bin/env python3
 import json, os, re, sys, tempfile, time
 with open(os.path.join(os.environ["FAKE_DIR"], "calls.jsonl"), "a") as log:
@@ -28,7 +30,12 @@ if os.environ.get("FAKE_EXIT"):
     sys.exit(int(os.environ["FAKE_EXIT"]))
 top = re.search(r"script at (\S+):", sys.stdin.read()).group(1)
 parts = json.loads(re.search(r"const PARTS = (.*)\n", open(top).read()).group(1))
-jobs = [x for p in parts for x in json.loads(re.search(r"const JOBS = (.*)\n", open(p).read()).group(1))]
+# A data script is its meta line, "return [", one "[index, prompt]," per line, and "]".
+lines = {p: open(p, encoding="utf-8").read().split("\n") for p in [top, *parts]}
+jobs = [json.loads(x.removesuffix(",")) for p in parts for x in lines[p][2:-2]]
+with open(os.path.join(os.environ["FAKE_DIR"], "scripts.jsonl"), "a") as log:
+    log.write(json.dumps({"top": os.path.getsize(top), "parts": [os.path.getsize(p) for p in parts],
+                          "longest_line": max(len(x) for v in lines.values() for x in v)}) + "\n")
 say = lambda e: print(json.dumps(e), flush=True)
 if os.environ.get("FAKE_NOJOURNAL"):
     say({"type": "result", "result": "I would rather not."})
@@ -61,7 +68,8 @@ for k, prompt in jobs:
                                    "spent": "You've hit your limit · resets 5pm",
                                    "busy": "You've hit your usage limit"}[prompt]})
     else:
-        line = {"type": "result", "agentId": f"a{k}", "result": prompt.upper()}
+        line = {"type": "result", "agentId": f"a{k}",
+                "result": '<invoke name="bash">ls</invoke>\nFAKE' if prompt == "fake" else prompt.upper()}
     s = json.dumps(line) + "\n"
     if prompt == "slow":
         j.write(s[:10]); j.flush(); time.sleep(2.5)
@@ -73,7 +81,8 @@ for k, _ in jobs:
     again.write(json.dumps({"type": "result", "agentId": f"a{k}", "result": "AGAIN"}) + "\n")
 again.close()
 summary = os.path.join(os.environ["FAKE_DIR"], f"summary{os.getpid()}.json")
-json.dump({"workflowProgress": progress}, open(summary, "w"))
+s = json.dumps({"summary": "claude-fleet · answers", "workflowProgress": progress}, ensure_ascii=False).encode()
+open(summary, "wb").write(s[:s.index("·".encode()) + 1] if os.environ.get("FAKE_SUMMARY_CUT") else s)
 say({"type": "system", "subtype": "task_notification", "output_file": summary})
 say({"type": "result", "result": "done"})
 '''
@@ -154,6 +163,39 @@ def test_web_tools_and_budget():
         assert [c["searches"] for c in calls] == ["400", "200", "400"], calls  # 200 per job in the session
 
 
+def test_cut_summary_fails_its_jobs_not_the_fleet():
+    with tempfile.TemporaryDirectory() as d:
+        setup(d)
+        os.environ["FAKE_SUMMARY_CUT"] = "1"
+        try:
+            code, rows = run(d, [("a", "boom"), ("b", "x"), ("c", "y")])
+        finally:
+            del os.environ["FAKE_SUMMARY_CUT"]
+        assert code == 1, code
+        assert sorted((r["id"], r["ok"]) for r in rows) == [("a", False), ("b", True), ("c", True)], rows
+        assert "run summary" in next(r["error"] for r in rows if not r["ok"]), rows
+
+
+def test_scripts_stay_readable():
+    # Four prompts of 150 KB: the script the parent runs stays small, each data script holds what
+    # fits under the Workflow tool's limit, and no line holds more than one prompt.
+    with tempfile.TemporaryDirectory() as d:
+        setup(d)
+        prompts = [(i, f"p{i} " + "x" * 150_000) for i in range(4)]
+        code, rows = run(d, prompts, "--chunk", "4")
+        assert code == 0 and {r["id"]: r["answer"] for r in rows} == {i: p.upper() for i, p in prompts}, code
+        [s] = [json.loads(x) for x in open(os.path.join(d, "scripts.jsonl"))]
+        assert s["top"] < 2000 and len(s["parts"]) == 2 and max(s["parts"]) < claude_fleet.SCRIPT_MAX, s
+        assert s["longest_line"] < 150_100, s
+
+
+def test_fake_tool_calls_are_flagged():
+    with tempfile.TemporaryDirectory() as d:
+        setup(d)
+        code, rows = run(d, [("a", "fake"), ("b", "x")])
+        assert code == 0 and {r["id"]: "fake_tool_call" in r for r in rows} == {"a": True, "b": False}, rows
+
+
 def test_sessions_that_run_nothing():
     for env, expect in (("FAKE_NOJOURNAL", "ran no agents"), ("FAKE_EXIT", 75)):
         with tempfile.TemporaryDirectory() as d:
@@ -171,5 +213,8 @@ if __name__ == "__main__":
     test_rows_failures_and_limit()
     test_concurrent_cap_is_not_a_usage_limit()
     test_web_tools_and_budget()
+    test_cut_summary_fails_its_jobs_not_the_fleet()
+    test_scripts_stay_readable()
+    test_fake_tool_calls_are_flagged()
     test_sessions_that_run_nothing()
     print("ok")

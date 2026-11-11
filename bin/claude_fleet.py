@@ -12,13 +12,20 @@ error; the sessions' stderr goes to results.log.
 
 Each chunk of --chunk jobs is one `claude-auto --strict -p` session from an empty directory (the
 parent on --model with only the Workflow and Read tools, plus WebSearch and WebFetch with --web;
-no MCP, no CLAUDE.md) that runs a generated workflow: one agent() per job with its prompt inline,
---concurrency at once. Workers get no tools (WebSearch and WebFetch with --web) and the
-workflow's subagent framing ("your final text is the return value"). A chunk is one ~400 MB process where claude_pool spends ~250 MB per
-job in flight (fan-out skill, "Claude fleets"). The Workflow tool refuses a script over 512 KB,
-so a chunk's jobs are spread over child scripts that the top script runs under one concurrency
-gate. Answers come from the workflow's journal.jsonl, read as it grows. Chunks run one after
-another, so each one's last wave runs below --concurrency.
+no MCP, no CLAUDE.md) that runs a generated workflow: one agent() per job, --concurrency at once.
+Workers get no tools (WebSearch and WebFetch with --web) and the workflow's subagent framing
+("your final text is the return value"). A chunk is one ~400 MB process where claude_pool spends
+~250 MB per job in flight (fan-out skill, "Claude fleets"). The script the parent runs holds the
+logic and the paths of its data scripts, so it stays small whatever the prompts' size and the
+parent can read it whole (Opus parents refused to run scripts they could not read: 486 KB of
+prompts on one line). The prompts sit in those data scripts, one prompt per line, each script
+under the Workflow tool's 512 KB limit. Answers come from the workflow's journal.jsonl, read as it
+grows. Chunks run one after another, so each one's last wave runs below --concurrency. Headless,
+the CLI stops background tasks 10 minutes after the parent's last turn, and a session's workflow
+runs after its parent's only turn: the fleet turns that ceiling off, so --timeout bounds a session.
+
+Workers have no tools, yet sometimes write a tool call out as text (`<invoke name=...>`) before
+their answer. Such a row keeps the answer as given and carries "fake_tool_call": true.
 
 A session's agents share one web search budget (200 searches by default), so --web gives each
 session 200 per job. Each search is its own request and agents send several at once, so a web
@@ -41,8 +48,11 @@ from pool_status import publish
 SCRIPT_MAX = 500_000  # bytes per workflow script: the Workflow tool refuses files over 524,288
 SEARCHES_PER_JOB = 200  # the CLI's default web search budget for a whole session
 ORCHESTRATE = ("I am asking you to run the workflow script at {path}: call the Workflow tool once with "
-               "scriptPath set to that path, and do not relaunch or resume it. When it completes, reply "
-               "with the single word done.")
+               "scriptPath set to that path, and do not relaunch or resume it. The script is short: it loads "
+               "the prompts from the data scripts it names, each of which only returns a list of [index, "
+               "prompt], and gives each prompt to one agent. When it completes, reply with the single word done.")
+# A tool call written out as text, which a worker's answer sometimes holds: it never ran.
+FAKE_TOOL_CALL = re.compile(r"</?(\w+:)?(invoke|function_calls)\b")
 # How the CLI words a spent account: "You've hit your limit", "hit your session limit", "You've
 # reached your Fable limit", "You're out of usage credits", "usage credit limit".
 LIMIT = re.compile(r"hit your (\w+ )?limit|reached your \w+ limit|out of usage credits|usage credit limit")
@@ -51,31 +61,33 @@ LIMIT = re.compile(r"hit your (\w+ )?limit|reached your \w+ limit|out of usage c
 CAP_WORDS = re.compile(r"hit your usage limit")
 
 
-def part_script(entries: list[tuple[int, str]], model: str, effort: str) -> str:
-    """A workflow that runs each (index, prompt) as one tool-free agent labelled by its index (the
-    runtime rewrites labels' whitespace, so ids would not survive as labels)."""
-    return ("export const meta = { name: 'claude-fleet-part', description: 'Answer independent prompts, one agent each' }\n"
-            f"const JOBS = {json.dumps(entries, ensure_ascii=False)}\n"
-            f"const out = await parallel(JOBS.map(([k, prompt]) => () => agent(prompt, "
-            f"{{ label: String(k), model: {json.dumps(model)}, effort: {json.dumps(effort)}, disallowedTools: ['Read'] }})))\n"
-            "return out.filter(x => x != null).length\n")
+def data_script(entries: list[tuple[int, str]]) -> str:
+    """A workflow that only returns its (index, prompt) pairs, one per line, so that a reader can page
+    through the prompts."""
+    return ("export const meta = { name: 'claude-fleet-prompts', description: 'Prompts for claude-fleet, as data' }\n"
+            "return [\n" + "".join(json.dumps(e, ensure_ascii=False) + ",\n" for e in entries) + "]\n")
 
 
-def top_script(parts: list[str]) -> str:
-    """The script the session runs: every part script at once, sharing the session's agent gate."""
+def fleet_script(parts: list[str], model: str, effort: str) -> str:
+    """The script the session runs, which holds all of the run's logic: load the prompts from the data
+    scripts, then run each as one tool-free agent labelled by its index (the runtime rewrites labels'
+    whitespace, so ids would not survive as labels)."""
     return ("export const meta = { name: 'claude-fleet', description: 'Answer independent prompts, one agent each' }\n"
             f"const PARTS = {json.dumps(parts)}\n"
-            "const n = await parallel(PARTS.map(p => () => workflow({ scriptPath: p })))\n"
-            "return `${n.reduce((a, b) => a + (b || 0), 0)} answered`\n")
+            "const jobs = []\n"
+            "for (const p of PARTS) jobs.push(...await workflow({ scriptPath: p }))\n"
+            "const out = await parallel(jobs.map(([k, prompt]) => () => agent(prompt, "
+            f"{{ label: String(k), model: {json.dumps(model)}, effort: {json.dumps(effort)}, disallowedTools: ['Read'] }})))\n"
+            "return `${out.filter(x => x != null).length} answered`\n")
 
 
 def entry_bytes(k: int, prompt: str) -> int:
-    return len(json.dumps([k, prompt], ensure_ascii=False).encode()) + 2  # its entry in JOBS, with the ", "
+    return len(json.dumps([k, prompt], ensure_ascii=False).encode()) + 2  # its line in a data script, with the ",\n"
 
 
-def pack(entries: list[tuple[int, str]], model: str, effort: str) -> list[list[tuple[int, str]]]:
-    """Consecutive runs of entries whose part script stays under SCRIPT_MAX."""
-    base, parts, size = len(part_script([], model, effort).encode()), [], 0
+def pack(entries: list[tuple[int, str]]) -> list[list[tuple[int, str]]]:
+    """Consecutive runs of entries whose data script stays under SCRIPT_MAX."""
+    base, parts, size = len(data_script([]).encode()), [], 0
     for k, prompt in entries:
         if not parts or size + entry_bytes(k, prompt) > SCRIPT_MAX:
             parts.append([]); size = base
@@ -90,13 +102,13 @@ def run_session(chunk: list[dict], args, workdir: str, log: Path, record, live) 
     when the session ran no agents at all."""
     d = tempfile.mkdtemp(dir=workdir)
     paths = []
-    for i, part in enumerate(pack([(k, j["prompt"]) for k, j in enumerate(chunk)], args.model, args.effort)):
-        paths.append(os.path.join(d, f"part{i}.js"))
-        Path(paths[-1]).write_text(part_script(part, args.model, args.effort))
+    for i, part in enumerate(pack([(k, j["prompt"]) for k, j in enumerate(chunk)])):
+        paths.append(os.path.join(d, f"prompts{i}.js"))
+        Path(paths[-1]).write_text(data_script(part), encoding="utf-8")
     top = os.path.join(d, "fleet.js")
-    Path(top).write_text(top_script(paths))
+    Path(top).write_text(fleet_script(paths, args.model, args.effort), encoding="utf-8")
     # The parent runs on the workers' model so claude-auto weighs the right limits (a Fable week).
-    # Workers inherit the parent's tools, minus Read (their part script disallows it).
+    # Workers inherit the parent's tools, minus Read (the script disallows it).
     tools = "Workflow,Read" + (",WebSearch,WebFetch" if args.web else "")
     cmd = ["claude-auto", "--strict", "-p", "--model", args.model, "--output-format", "stream-json", "--verbose",
            "--tools", tools, "--allowedTools", tools, "--setting-sources", "project",
@@ -104,7 +116,11 @@ def run_session(chunk: list[dict], args, workdir: str, log: Path, record, live) 
     env = {**os.environ, "CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS": str(args.concurrency),
            # A session's agents share one web search budget, 200 by default: size the shared pool
            # at the 200 a `claude -p` per job would have had.
-           "CLAUDE_CODE_MAX_WEB_SEARCHES_PER_SESSION": str(SEARCHES_PER_JOB * len(chunk))}
+           "CLAUDE_CODE_MAX_WEB_SEARCHES_PER_SESSION": str(SEARCHES_PER_JOB * len(chunk)),
+           # Headless, the CLI stops background tasks (the workflow) 10 minutes after the last turn
+           # ("Background tasks still running 10m after the last turn"); 0 waits for them, and the
+           # session's deadline in watch() bounds it instead.
+           "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS": "0"}
     with open(log, "a") as err:
         err.write(f"== {time.strftime('%F %T')} session of {len(chunk)} jobs in {d}\n")
         err.flush()
@@ -170,8 +186,10 @@ def watch(proc, top, chunk, args, log, log_from, record, live) -> bool:
                     ans = e.get("result") if isinstance(e.get("result"), str) else ""
                     if e["type"] == "result" and ans.strip() and k not in finished:
                         finished.add(k)
-                        record({"id": chunk[k]["id"], "ok": True, "attempts": 1,
-                                "s": round(time.time() - t), "answer": ans})
+                        row = {"id": chunk[k]["id"], "ok": True, "attempts": 1, "s": round(time.time() - t), "answer": ans}
+                        if FAKE_TOOL_CALL.search(ans):
+                            row["fake_tool_call"] = True
+                        record(row)
                     else:
                         failed.add(k)
             live(len(agents) - len(finished) - len(failed - finished))
@@ -183,10 +201,19 @@ def watch(proc, top, chunk, args, log, log_from, record, live) -> bool:
         time.sleep(2)
     reader.join(10)
 
-    # Why agents failed: the run summary's per-agent errors, by label.
-    reasons = {}
+    # Why agents failed: the run summary's per-agent errors, by label. The session writes the summary
+    # in place (truncate, then write, without waiting on it) and has exited by now (claude-auto execs
+    # claude), so a summary that is empty or cut short stays that way. Its failed jobs say so, and a
+    # usage limit that only an agent's error named goes unseen: those jobs fail and the fleet goes on.
+    reasons, unread = {}, ""
     if seen["summary"] and os.path.exists(seen["summary"]):
-        for p in json.load(open(seen["summary"])).get("workflowProgress", []):
+        try:
+            progress = json.loads(Path(seen["summary"]).read_text(encoding="utf-8")).get("workflowProgress", [])
+        except ValueError as e:  # bad JSON, or cut inside a UTF-8 character
+            unread = f"no agent's error is known: the session left its run summary {seen['summary']} unparseable ({e})"
+            print(f"  {unread}", flush=True)
+            progress = []
+        for p in progress:
             if p.get("type") == "workflow_agent" and p.get("error"):
                 reasons[int(p["label"])] = p["error"]
     with open(log) as f:
@@ -213,7 +240,7 @@ def watch(proc, top, chunk, args, log, log_from, record, live) -> bool:
         if busy and CAP_WORDS.search(why):
             why = f"the account's cap on concurrent requests ({why})"
         record({"id": chunk[k]["id"], "ok": False, "attempts": 1, "s": round(time.time() - t0),
-                "error": f"{why}; see {log}"})
+                "error": f"{why}; {unread + '; ' if unread else ''}see {log}"})
     return False
 
 
@@ -243,18 +270,19 @@ def main():
     print(f"{len(todo)} jobs ({len(done)} already done), {args.model} {args.effort}, "
           f"{args.concurrency} in flight, {args.chunk} per session", flush=True)
 
-    lock, n, failed, inflight, total = threading.Lock(), [0], [0], [0], len(todo)
+    lock, n, failed, faked, inflight, total = threading.Lock(), [0], [0], [0], [0], len(todo)
 
     def record(row):
         with lock, open(out, "a") as f:
             f.write(json.dumps(row) + "\n")
             n[0] += 1
             failed[0] += not row["ok"]
+            faked[0] += "fake_tool_call" in row
         if n[0] % 10 == 0 or not row["ok"]:
             print(f"  {n[0]}/{total} done, {failed[0]} failed"
                   + ("" if row["ok"] else f"  {row['id']}: {row['error'][:120]}"), flush=True)
 
-    room = SCRIPT_MAX - len(part_script([], args.model, args.effort).encode())
+    room = SCRIPT_MAX - len(data_script([]).encode())
     too_big = [j for j in todo if entry_bytes(args.chunk, j["prompt"]) > room]
     for j in too_big:
         record({"id": j["id"], "ok": False, "attempts": 0, "s": 0,
@@ -274,7 +302,8 @@ def main():
                       "session's account at its limit), stopping", flush=True)
                 stop = True
                 break
-    print(f"{n[0]} jobs, {failed[0]} failed -> {out}" + (", stopped at a usage limit" if stop else ""), flush=True)
+    print(f"{n[0]} jobs, {failed[0]} failed -> {out}" + (", stopped at a usage limit" if stop else "")
+          + (f"; {faked[0]} answers hold a tool call written as text (\"fake_tool_call\")" if faked[0] else ""), flush=True)
     raise SystemExit(75 if stop else 1 if failed[0] else 0)
 
 
