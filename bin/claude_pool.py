@@ -7,8 +7,10 @@
 Same files as codex_pool.py, so a stage can switch vendor by switching the
 command: PROMPTS.jsonl holds one {"id": ..., "prompt": ...} per line, ids
 unique; results are appended to results.jsonl as {"id", "ok", "answer" |
-"error", "attempts", "s"}, ids already ok there are skipped, and re-running the
-same command resumes.
+"error", "attempts", "s"} as each job finishes, ids already ok there are
+skipped, and re-running the same command resumes. An answer that holds a tool
+call written out as text (`<invoke name=...>`, which never ran) is kept as given
+and its row carries "fake_tool_call": true.
 
 Each job is one `claude-auto --strict -p` process (~250 MB; fan-out skill,
 "Claude fleets"), run from an empty directory with no tools unless --web
@@ -23,13 +25,15 @@ Put the data in the prompt: a worker cannot read files, unless --read DIR gives 
 Read/Grep/Glob over DIR (repeatable; name absolute paths in the prompt).
 Tool-free jobs run lighter through claude_fleet.py: one process per chunk, not per job.
 """
-import argparse, json, os, subprocess, tempfile, threading, time
-from concurrent.futures import ThreadPoolExecutor
+import argparse, json, os, re, subprocess, tempfile, threading, time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from pool_status import publish
 
 STOP = threading.Event()  # set once every account is past its cutoff: no job starts after it
+# A tool call written out as text, which an answer sometimes holds: it never ran.
+FAKE_TOOL_CALL = re.compile(r"</?(invoke|function_calls)\b")
 
 
 def answer_of(stdout: str) -> tuple[str | None, str]:
@@ -43,7 +47,7 @@ def answer_of(stdout: str) -> tuple[str | None, str]:
     return out["result"], ""
 
 
-def run_job(job: dict, args, cwd: str) -> dict:
+def run_job(job: dict, args, cwd: str) -> dict | None:
     tools = ",".join((["WebSearch", "WebFetch"] if args.web else []) + (["Read", "Grep", "Glob"] if args.read else []))
     cmd = ["claude-auto", "--strict", "-p", "--model", args.model, "--effort", args.effort,
            "--output-format", "json", "--tools", tools, "--setting-sources", "project",
@@ -78,8 +82,10 @@ def run_job(job: dict, args, cwd: str) -> dict:
             print(f"{time.strftime('%T')} {job['id']}: account hit its limit, stopping", flush=True)
             STOP.set()
             return None
-        row ={"id": job["id"], "ok": ans is not None, "attempts": attempts, "s": round(time.time() - t0)}
+        row = {"id": job["id"], "ok": ans is not None, "attempts": attempts, "s": round(time.time() - t0)}
         row.update({"answer": ans} if ans is not None else {"error": err})
+        if ans is not None and FAKE_TOOL_CALL.search(ans):
+            row["fake_tool_call"] = True
         return row
 
 
@@ -104,24 +110,29 @@ def main():
     todo = [j for j in jobs if j["id"] not in done]
     print(f"{len(todo)} jobs ({len(done)} already done), {args.model} {args.effort} "
           f"web={'on' if args.web else 'off'}, {args.concurrency} in flight", flush=True)
-    lock, failed, n = threading.Lock(), 0, 0
+    failed, faked, n = 0, 0, 0
     # Claude jobs pick their account per job (claude-auto), so in flight is one count; the hud
     # attributes the running `claude -p` processes to accounts itself.
     publish("claude", args.prompts, args.model, lambda: {
         "total": len(done) + len(todo), "base": len(done), "done": len(done) + n, "failed": failed,
         "inflight": min(args.concurrency, len(todo) - n)})
+    # Rows are written as jobs finish, not in submission order, so a slow job holds back no other's
+    # row and a run killed midway keeps every row it finished.
     with tempfile.TemporaryDirectory(prefix="claude_pool.") as cwd, ThreadPoolExecutor(args.concurrency) as ex:
-        for row in ex.map(lambda j: run_job(j, args, cwd), todo):
+        for fut in as_completed([ex.submit(run_job, j, args, cwd) for j in todo]):
+            row = fut.result()
             if row is None:  # not run, or cut off by the limit: a re-run picks it up
                 continue
-            with lock, open(out, "a") as f:
+            with open(out, "a") as f:
                 f.write(json.dumps(row) + "\n")
             n += 1
             failed += not row["ok"]
+            faked += "fake_tool_call" in row
             if n % 10 == 0 or not row["ok"]:
                 print(f"  {n}/{len(todo)} done, {failed} failed"
                       + ("" if row["ok"] else f"  {row['id']}: {row['error'][:120]}"), flush=True)
-    print(f"{n} jobs, {failed} failed -> {out}" + (", stopped: every account past its cutoff" if STOP.is_set() else ""), flush=True)
+    print(f"{n} jobs, {failed} failed -> {out}" + (", stopped: every account past its cutoff" if STOP.is_set() else "")
+          + (f"; {faked} answers hold a tool call written as text (\"fake_tool_call\")" if faked else ""), flush=True)
     raise SystemExit(75 if STOP.is_set() else 1 if failed else 0)
 
 

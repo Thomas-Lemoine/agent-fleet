@@ -106,9 +106,11 @@ claude_fleet.py prompts.jsonl --model opus --effort high --concurrency 16
   (100) of jobs is one `claude-auto --strict` session, so every chunk picks
   the account with room. It stops with exit 75 when accounts run out, and
   loudly when a session runs no agents. Failed rows carry the agent's error.
-- Prompts go inline in generated workflow scripts, which are capped at
-  512 KB: a chunk spreads over child scripts, and a single prompt too big
-  for one fails its row ("use claude_pool.py").
+- The script the parent runs holds only the logic, so the parent can read
+  it whole: Opus parents refused to run scripts they could not read (486 KB
+  of prompts on one line). The prompts sit in data scripts it loads, one
+  prompt per line, each capped at 512 KB; a single prompt too big for one
+  fails its row ("use claude_pool.py").
 - Workers have no tools (WebSearch and WebFetch with `--web`) and the
   workflow's subagent framing, so answers run terser than claude_pool's.
   On a 600-item benchmark the fleet's accuracy matched claude_pool's
@@ -162,7 +164,10 @@ CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS=32 CLAUDE_CONFIG_DIR=~/.claude-b \
   stdin: `--allowedTools` is variadic and swallows a trailing prompt.
 - **`scriptPath` needs `Read` in `--tools`;** without it the Workflow tool
   takes only an inline `script`. Headless, the workflow runs in the
-  background and the session exits once it ends. Per-agent answers are in
+  background and the session exits once it ends, except that the CLI stops
+  background tasks 10 minutes after the last turn: set
+  `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0` for any workflow longer than
+  that (claude_fleet does). Per-agent answers are in
   `<transcript dir>/journal.jsonl` (the Workflow tool result names the
   dir); failure reasons only in the task notification's `output_file`
   (`workflowProgress[].error`). Labels come back with whitespace collapsed,
