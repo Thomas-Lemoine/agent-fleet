@@ -18,7 +18,7 @@ mkdir -p "$prefix"
 for f in "$here"/bin/*; do
   [ -f "$f" ] || continue                     # bin/__pycache__
   name="$(basename "$f")"
-  [ "$name" = pool_status.py ] && continue  # a library the pools import, not a command
+  [ "$name" = pool_status.py ] && continue  # a library the pools and claude-auto import, not a command
   [ "$name" = codex ] && [ $router = 0 ] && continue
   dst="$prefix/$name"
   if [ "$(readlink "$dst" 2>/dev/null)" = "$f" ]; then

@@ -4,7 +4,7 @@ and a re-run resumes. A fake claude-auto on PATH stands in for `claude -p`, so i
 
     uv run --no-project python tests/test_claude_pool.py
 """
-import json, os, stat, sys, tempfile
+import contextlib, io, json, os, shutil, stat, sys, tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bin"))
 import claude_pool
@@ -58,6 +58,48 @@ def test_rows_land_as_jobs_finish():
         assert code == 0 and [r["id"] for r in rows] == ["b", "a", "c"], rows
 
 
+def fake_auto(d, script):
+    """Puts a claude-auto running this sh script first on PATH."""
+    bin_ = os.path.join(d, "bin"); os.mkdir(bin_)
+    fake = os.path.join(bin_, "claude-auto")
+    open(fake, "w").write("#!/bin/sh\n" + script)
+    os.chmod(fake, os.stat(fake).st_mode | stat.S_IEXEC)
+    os.environ["PATH"] = bin_ + os.pathsep + os.environ["PATH"]
+
+
+def pool_exit(d, n):
+    """claude_pool over n jobs in d: its exit code."""
+    path = os.path.join(d, "p.jsonl")
+    open(path, "w").writelines(json.dumps({"id": str(i), "prompt": "x"}) + "\n" for i in range(n))
+    sys.argv = ["claude_pool", path, "--concurrency", "2"]
+    try:
+        claude_pool.main()
+    except SystemExit as e:
+        return e.code
+
+
+def test_full_disk_refuses_to_start():
+    # Under 5 GB free where the results go: the pool exits 73 with one line naming the space and the
+    # path, and no job runs (this claude-auto records that it ran).
+    real, err = shutil.disk_usage, io.StringIO()
+    shutil.disk_usage = lambda p: real(p)._replace(free=4_500_000_000)
+    try:
+        with tempfile.TemporaryDirectory() as d, contextlib.redirect_stderr(err):
+            fake_auto(d, f"touch {d}/ran\n")
+            assert pool_exit(d, 1) == 73
+            assert sorted(os.listdir(d)) == ["bin", "p.jsonl"], os.listdir(d)
+            assert f"claude_pool: only 4.50 GB free on {d}, under the 5 GB floor" in err.getvalue(), err.getvalue()
+    finally:
+        shutil.disk_usage = real
+    # The disk crosses the floor mid-run: claude-auto refuses the jobs, and the pool stops (exit 73)
+    # with them unrecorded instead of failing every one.
+    with tempfile.TemporaryDirectory() as d:
+        fake_auto(d, "echo 'claude-auto: only 4.90 GB free on /x, under the 5 GB floor' >&2; exit 73\n")
+        assert pool_exit(d, 20) == 73
+        assert not os.path.exists(os.path.join(d, "p.results.jsonl"))
+
+
 if __name__ == "__main__":
     test_rows_land_as_jobs_finish()
+    test_full_disk_refuses_to_start()
     print("ok")

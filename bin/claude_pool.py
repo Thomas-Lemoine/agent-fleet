@@ -21,6 +21,9 @@ cutoff, and then the whole pool stops (exit 75) instead of waiting: a pool that
 sleeps until the 5-hour window resets spends each new window the moment it opens
 and once ate an account's whole week in a day. Re-run to resume.
 Anything else that yields no answer fails the job loudly in the results file.
+With less than 5 GB free where results.jsonl goes, the pool refuses to start
+(exit 73); when claude-auto refuses a job at that floor mid-run, the pool stops
+the same way, leaving the unfinished jobs unrecorded.
 Put the data in the prompt: a worker cannot read files, unless --read DIR gives it read-only
 Read/Grep/Glob over DIR (repeatable; name absolute paths in the prompt).
 Tool-free jobs run lighter through claude_fleet.py: one process per chunk, not per job.
@@ -29,9 +32,10 @@ import argparse, json, os, re, subprocess, tempfile, threading, time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from pool_status import publish
+from pool_status import DISK_EXIT, disk_floor, publish
 
-STOP = threading.Event()  # set once every account is past its cutoff: no job starts after it
+STOP = threading.Event()  # set once every account is past its cutoff, or the disk under its floor: no job starts after it
+FULL = threading.Event()  # set when claude-auto refused a job at the disk floor (STOP is set too)
 # A tool call written out as text, which an answer sometimes holds: it never ran.
 FAKE_TOOL_CALL = re.compile(r"</?(\w+:)?(invoke|function_calls)\b")
 
@@ -71,6 +75,10 @@ def run_job(job: dict, args, cwd: str) -> dict | None:
             print(f"{time.strftime('%T')} {job['id']}: every account past its cutoff, stopping", flush=True)
             STOP.set()
             return None
+        if p.returncode == DISK_EXIT:  # claude-auto's disk floor: stop, or every job left fails in seconds
+            print(f"{time.strftime('%T')} {job['id']}: {p.stderr.strip()}, stopping", flush=True)
+            FULL.set(); STOP.set()
+            return None
         try:
             ans, err = answer_of(p.stdout)
         except (json.JSONDecodeError, StopIteration):
@@ -108,6 +116,7 @@ def main():
         raise SystemExit("duplicate ids in the prompts file")
     done = {json.loads(x)["id"] for x in open(out) if x.strip() and json.loads(x)["ok"]} if out.exists() else set()
     todo = [j for j in jobs if j["id"] not in done]
+    disk_floor("claude_pool", out.absolute().parent)
     print(f"{len(todo)} jobs ({len(done)} already done), {args.model} {args.effort} "
           f"web={'on' if args.web else 'off'}, {args.concurrency} in flight", flush=True)
     failed, faked, n = 0, 0, 0
@@ -134,9 +143,10 @@ def main():
                           + ("" if row["ok"] else f"  {row['id']}: {row['error'][:120]}"), flush=True)
         finally:  # after an error or Ctrl-C, the queued jobs never start
             ex.shutdown(cancel_futures=True)
-    print(f"{n} jobs, {failed} failed -> {out}" + (", stopped: every account past its cutoff" if STOP.is_set() else "")
+    stopped = ", stopped: under the disk floor" if FULL.is_set() else ", stopped: every account past its cutoff"
+    print(f"{n} jobs, {failed} failed -> {out}" + (stopped if STOP.is_set() else "")
           + (f"; {faked} answers hold a tool call written as text (\"fake_tool_call\")" if faked else ""), flush=True)
-    raise SystemExit(75 if STOP.is_set() else 1 if failed else 0)
+    raise SystemExit(DISK_EXIT if FULL.is_set() else 75 if STOP.is_set() else 1 if failed else 0)
 
 
 if __name__ == "__main__":

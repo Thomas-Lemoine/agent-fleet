@@ -5,7 +5,7 @@ account's slots. Fakes the app-server, so it runs anywhere:
 
     uv run --no-project python tests/test_codex_pool.py
 """
-import json, os, subprocess, sys, tempfile, threading, time
+import contextlib, io, json, os, shutil, subprocess, sys, tempfile, threading, time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bin"))
 import codex_pool
@@ -157,9 +157,37 @@ def test_slots_are_shared_and_die_with_their_process():
         assert y.acquire(after(5)) == 0
 
 
+def test_full_disk_refuses_to_start():
+    """Under 5 GB free where the results go: the pool exits 73 with one line naming the space and
+    the path, before it starts a server or writes a row."""
+    started = []
+
+    class Server(FakeServer):
+        def __init__(self, a, home, log):
+            started.append(home)
+            super().__init__(a, home, log)
+    codex_pool.Server = Server
+    real, err = shutil.disk_usage, io.StringIO()
+    shutil.disk_usage = lambda p: real(p)._replace(free=4_500_000_000)
+    try:
+        with tempfile.TemporaryDirectory() as d, contextlib.redirect_stderr(err):
+            prompts = os.path.join(d, "p.jsonl")
+            open(prompts, "w").write(json.dumps({"id": "a", "prompt": "x"}) + "\n")
+            sys.argv = ["codex_pool", prompts, "--home", homes_in(d, "ok")[0]]
+            try:
+                codex_pool.main()
+            except SystemExit as e:
+                assert e.code == 73, e.code
+            assert not started and not os.path.exists(os.path.join(d, "p.results.jsonl")), started
+            assert f"codex_pool: only 4.50 GB free on {d}, under the 5 GB floor" in err.getvalue(), err.getvalue()
+    finally:
+        shutil.disk_usage = real
+
+
 if __name__ == "__main__":
     test_slots_are_shared_and_die_with_their_process()
     test_dry_account_hands_back_its_jobs()
     test_revoked_login_is_a_dry_account()
     test_saturated_account_takes_no_jobs()
+    test_full_disk_refuses_to_start()
     print("ok")

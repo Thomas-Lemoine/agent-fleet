@@ -2,7 +2,7 @@
   "name": "agent-fleet",
   "version": "0.1.0",
   "author": { "name": "Thomas Lemoine" },
-  "description": "A hud of Claude and codex quota, machines, pools and subagents, plus astra and sol: subagents that relay a GPT second opinion through codex and can't answer as themselves",
+  "description": "A hud of Claude and codex quota, machines, pools and subagents, plus astra and sol: subagents that relay a GPT second opinion through codex and can't answer as themselves, and a guard that denies pkill -f",
   "types": "./types/index.d.ts",
   "userConfig": {
     "remote": {

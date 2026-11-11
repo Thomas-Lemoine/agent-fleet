@@ -22,6 +22,9 @@ times the share of the 5-hour window left. An account whose week resets soon wit
 unspent wins by a lot (that allowance is lost otherwise); a busy 5-hour window pulls it down.
 When every account is past a cutoff, take the one with the most room in its tightest limit
 instead; refuse only when every account is at 100% of one.
+
+Launching also needs 5 GB free on the working dir's filesystem (pool_status.disk_floor): below
+that, claude-auto exits 73 with one line on stderr and starts nothing.
 """
 import json
 import os
@@ -29,6 +32,8 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+
+from pool_status import disk_floor
 
 HOME = Path.home()
 
@@ -147,6 +152,9 @@ def main():
     if "--which" in sys.argv[1:]:
         print(render(table, now) + f"\n-> {acct}")
         return
+    # As the pools do, refuse to start a session on a nearly full disk, where its every Bash call
+    # would soon fail. A pool that gets this exit stops there, its unfinished jobs unrecorded.
+    disk_floor("claude-auto", os.getcwd())
     print(f"claude-auto: account {acct}", file=sys.stderr)
     # A is the default home, reached only with the variable unset: set to ~/.claude, Claude
     # looks for ~/.claude/.claude.json (A's lives at ~/.claude.json) and refuses to start.
