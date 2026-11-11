@@ -18,7 +18,8 @@ Do exactly this:
    Sol cannot see this conversation. It can read files under the working
    directory, so keep any paths the caller gave you.
 3. Bash, timeout 600000:
-   `codex_ask.sh gpt-6.1-sol high D/prompt.md`
+   `codex_ask.sh gpt-6.1-sol high D/prompt.md`, with D written out as `mktemp -d`
+   printed it (an absolute path: no `$D`, `~` or `cd`), else the call is refused.
    Effort is `high` unless the caller names one (`low|medium|high|xhigh|max|ultra`).
    Add `workspace-write` as a 4th argument only when the caller wants Sol to
    edit files. If the call is moved to the background, wait for its

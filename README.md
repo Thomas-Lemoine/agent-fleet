@@ -13,7 +13,7 @@ Python stdlib only; every tool is a single file in `bin/`.
 | `codex_pool.py` | Runs a JSONL file of prompts through `codex app-server`, one server per account and ~50 turns in flight each. Accounts share one queue; an account that runs dry hands its jobs back. A re-run resumes by job id. |
 | `claude_fleet.py` | The Claude version: each chunk of 100 prompts is one headless Claude Code session running a Workflow, so one ~400 MB process does what would otherwise be 100 `claude -p` processes of ~250 MB each. Workers get no tools (web search with `--web`). |
 | `claude_pool.py` | Same files, one `claude -p` per job. Use it for what the fleet cannot do: images, read access to a directory (`--read`), or crash isolation. |
-| `codex_ask.sh` | One `codex exec` turn that fails loudly (`CODEX FAILED: …`) instead of returning an empty or truncated answer. For agents that relay a second opinion. |
+| `codex_ask.sh` | One `codex exec` turn that fails loudly (`CODEX FAILED: …`) instead of returning an empty or truncated answer, and leaves its whole stdout in `PROMPT_FILE.out`. For agents that relay a second opinion. |
 | `claude-auto` | Starts `claude` on the Claude account with the most usage to spare, based on its 5-hour and weekly windows. `--strict` exits 75 when every account is past its cutoff, so lanes stop instead of burning a window. |
 | `claude-usage`, `codex-usage` | Live quota of every logged-in account. Neither one costs a model call. |
 | `codex` | Optional router that shadows the real `codex` on PATH and gives every `codex` call the account with the most weekly quota left. |
@@ -72,7 +72,7 @@ They read `~/.config/agent-fleet/local.md` if it exists. Put your own setup ther
 `plugin/` is a Claude Code plugin, `agent-fleet`:
 
 - **The hud.** Claude and codex quota per account, this machine's cpu, memory and disk (and one remote machine's), running pools, and the session's subagents. It draws as a band above the prompt, plus a pane (docked beside the transcript in the fullscreen TUI); `/hud` toggles the pane.
-- **`agent-fleet:astra` and `agent-fleet:sol`.** Haiku subagents that run a task through `codex_ask.sh` (GPT-6 Astra, GPT-6.1 Sol). The plugin hands the caller `codex_ask.sh`'s own output in place of the relay's message, or the relay's `CODEX FAILED:` line, so a relay cannot pass off its own answer as GPT's.
+- **`agent-fleet:astra` and `agent-fleet:sol`.** Haiku subagents that run a task through `codex_ask.sh` (GPT-6 Astra, GPT-6.1 Sol). The plugin hands the caller `codex_ask.sh`'s own output (the `PROMPT_FILE.out` it leaves; the relay's command runs as written, which auto mode needs) in place of the relay's message, or the relay's `CODEX FAILED:` line, so a relay cannot pass off its own answer as GPT's.
 
 Run `install.sh` first: the plugin calls `codex_ask.sh` and `codex-usage` from PATH, and shows accounts with no live session from `claude-usage`'s `usage-probe.json`. Then, at a Claude Code prompt:
 
