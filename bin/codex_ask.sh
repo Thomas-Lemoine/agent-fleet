@@ -17,22 +17,26 @@
 # stdout on failure (exit 1): `CODEX FAILED: <why>` then the last stderr lines.
 # Failure = codex never started as MODEL (header check), exited non-zero, or
 # wrote no answer. Capacity shedding ("at capacity") is retried with backoff.
-# Side files next to PROMPT_FILE: PROMPT_FILE.answer and PROMPT_FILE.stderr.
-# With AGENT_FLEET_REPLY_DIR set (the agent-fleet plugin sets it for its relay
-# agents), the whole stdout is also left there as <time>.<pid>.out once complete.
+# Side files next to PROMPT_FILE: PROMPT_FILE.answer, PROMPT_FILE.stderr, and
+# PROMPT_FILE.out, the whole stdout (answer or CODEX FAILED lines). A run
+# removes the old .out once its arguments check out and moves the new one into
+# place whole as it ends; the agent-fleet plugin hands it to the caller of its
+# relay agents.
 set -u
 
-# Prints stdin as the script's stdout, kept in AGENT_FLEET_REPLY_DIR when set.
+reply=
+# Prints stdin as the script's stdout, and once the prompt is known also leaves
+# it as PROMPT_FILE.out, only if written whole.
 emit() {
-  [ -n "${AGENT_FLEET_REPLY_DIR:-}" ] || { cat; return; }
-  local f; f="$AGENT_FLEET_REPLY_DIR/$(date +%s).$$"
-  mkdir -p "$AGENT_FLEET_REPLY_DIR" && cat >"$f.tmp" && mv "$f.tmp" "$f.out" && cat "$f.out"
+  [ -n "$reply" ] || { cat; return; }
+  if tee "$reply.tmp" 2>/dev/null; then mv -f "$reply.tmp" "$reply"; else rm -f "$reply.tmp"; fi
 }
 fail() { { echo "CODEX FAILED: $1"; [ -n "${2:-}" ] && [ -f "$2" ] && tail -n 20 "$2"; } | emit; exit 1; }
 
 [ $# -ge 3 ] && [ $# -le 5 ] || fail "usage: codex_ask.sh MODEL EFFORT PROMPT_FILE [SANDBOX] [WEB]"
 model=$1 effort=$2 prompt=$3 sandbox=${4:-read-only} web=${5:-live}
-out=$prompt.answer err=$prompt.stderr
+out=$prompt.answer err=$prompt.stderr reply=$prompt.out
+rm -f "$reply" "$reply.tmp"
 [ -s "$prompt" ] || fail "prompt file '$prompt' is missing or empty"
 command -v codex >/dev/null 2>&1 || fail "codex CLI not on PATH"
 
