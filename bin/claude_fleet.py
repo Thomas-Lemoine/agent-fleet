@@ -38,12 +38,14 @@ session hits its usage limit, the fleet stops (exit 75) and leaves the unfinishe
 unrecorded: re-run to resume. Agents refused by the concurrent-request cap carry the CLI's "usage
 limit" words, but the account has room: those jobs fail and the fleet goes on. A session that
 runs no agents at all stops the fleet loudly rather than failing chunk after chunk. Anything else
-that yields no answer fails its job in the results file.
+that yields no answer fails its job in the results file. With less than 5 GB free where
+results.jsonl goes, the fleet refuses to start (exit 73), and it stops the same way, leaving the
+chunk unrecorded, when claude-auto refuses a session at that floor mid-run.
 """
 import argparse, json, math, os, re, signal, subprocess, sys, tempfile, threading, time
 from pathlib import Path
 
-from pool_status import publish
+from pool_status import DISK_EXIT, disk_floor, publish
 
 SCRIPT_MAX = 500_000  # bytes per workflow script: the Workflow tool refuses files over 524,288
 SEARCHES_PER_JOB = 200  # the CLI's default web search budget for a whole session
@@ -99,7 +101,7 @@ def run_session(chunk: list[dict], args, workdir: str, log: Path, record, live) 
     """Runs one chunk as one headless session, calling record(row) for each job as it finishes and
     live(n) with the agents in flight. Returns True when the session ran out of usage (claude-auto's
     exit 75, or the account hit its limit); its unfinished jobs then get no row. Raises SystemExit
-    when the session ran no agents at all."""
+    when the session ran no agents at all, or claude-auto refused it at the disk floor."""
     d = tempfile.mkdtemp(dir=workdir)
     paths = []
     for i, part in enumerate(pack([(k, j["prompt"]) for k, j in enumerate(chunk)])):
@@ -218,7 +220,11 @@ def watch(proc, top, chunk, args, log, log_from, record, live) -> bool:
                 reasons[int(p["label"])] = p["error"]
     with open(log) as f:
         f.seek(log_from)
-        said = f.read() + seen["last"] + " ".join(reasons.values())
+        logged = f.read()
+    if proc.returncode == DISK_EXIT:  # claude-auto refused at the disk floor: its line is all the log holds
+        print(logged.strip(), file=sys.stderr, flush=True)
+        raise SystemExit(DISK_EXIT)
+    said = logged + seen["last"] + " ".join(reasons.values())
     # "concurrents" is the account's cap on requests in flight, not its usage: the requests it
     # refused fail their agents with the CLI's "You've hit your usage limit", but the account
     # has room, so those jobs fail (a re-run retries them) and the fleet goes on. Any other
@@ -267,6 +273,7 @@ def main():
         raise SystemExit(f"{with_images} jobs carry images, which a workflow agent cannot take: use codex_pool.py")
     done = {json.loads(x)["id"] for x in open(out) if x.strip() and json.loads(x)["ok"]} if out.exists() else set()
     todo = [j for j in jobs if j["id"] not in done]
+    disk_floor("claude_fleet", out.absolute().parent)
     print(f"{len(todo)} jobs ({len(done)} already done), {args.model} {args.effort}, "
           f"{args.concurrency} in flight, {args.chunk} per session", flush=True)
 

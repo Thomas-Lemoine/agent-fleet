@@ -2,9 +2,11 @@ import { atom, read, update } from 'claude-code'
 import type { Elements, EngineInterface, FsStat, Register, RenderSurface, SessionRateLimit } from 'claude-code'
 
 import type { HudAgent, HudCodexUsage, HudCodexWeek, HudLimits, HudMachineStats, HudPool, HudSnapshot } from '../types'
+import { pkillGuard } from './guards'
 import { relayGuard } from './relay'
 
-// The agent-fleet plugin: the hud below, and relayGuard (relay.ts) for the astra and sol agents.
+// The agent-fleet plugin: the hud below, relayGuard (relay.ts) for the astra and sol agents, and
+// pkillGuard (guards.ts), which denies `pkill -f` in every session.
 //
 // The hud is a heads-up display of quota and machines. collect.py writes one shared snapshot file
 // for every session (a flock and a TTL make N sessions cost one collection per TTL); each
@@ -722,6 +724,7 @@ async function park($: EngineInterface) {
 
 export const register: Register = (on, options) => {
   relayGuard(on)
+  pkillGuard(on)
   const { remote, archive } = options
   self.collectArgs = [
     ...(typeof remote === 'string' && remote ? ['--remote', remote] : []),

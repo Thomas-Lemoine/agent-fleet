@@ -6,7 +6,7 @@ session, so it runs anywhere:
 
     uv run --no-project python tests/test_claude_fleet.py
 """
-import json, os, stat, sys, tempfile
+import contextlib, io, json, os, shutil, stat, sys, tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bin"))
 import claude_fleet
@@ -209,6 +209,32 @@ def test_sessions_that_run_nothing():
             assert code == expect if isinstance(expect, int) else expect in code, code
 
 
+def test_full_disk_refuses_to_start():
+    # Under 5 GB free where the results go, the fleet exits 73 with one line naming the space and the
+    # path, before any session or row; at exactly 5 GB it runs. A session claude-auto refuses at the
+    # floor mid-run (exit 73) stops the fleet the same way, with no row for its chunk.
+    real, err = shutil.disk_usage, io.StringIO()
+    try:
+        with tempfile.TemporaryDirectory() as d, contextlib.redirect_stderr(err):
+            setup(d)
+            shutil.disk_usage = lambda p: real(p)._replace(free=4_500_000_000)
+            assert run(d, [("a", "x")]) == (73, [])
+            assert not os.path.exists(os.path.join(d, "calls.jsonl"))
+            assert f"claude_fleet: only 4.50 GB free on {d}, under the 5 GB floor" in err.getvalue(), err.getvalue()
+            shutil.disk_usage = lambda p: real(p)._replace(free=5_000_000_000)
+            assert run(d, [("a", "x")]) == (0, [{"id": "a", "ok": True, "attempts": 1, "s": 0, "answer": "X"}])
+    finally:
+        shutil.disk_usage = real
+    with tempfile.TemporaryDirectory() as d:
+        setup(d)
+        os.environ["FAKE_EXIT"] = "73"
+        try:
+            assert run(d, [("a", "x"), ("b", "y"), ("c", "z")]) == (73, [])
+        finally:
+            del os.environ["FAKE_EXIT"]
+        assert len(open(os.path.join(d, "calls.jsonl")).readlines()) == 1  # the fleet stopped at the first chunk
+
+
 if __name__ == "__main__":
     test_rows_failures_and_limit()
     test_concurrent_cap_is_not_a_usage_limit()
@@ -217,4 +243,5 @@ if __name__ == "__main__":
     test_scripts_stay_readable()
     test_fake_tool_calls_are_flagged()
     test_sessions_that_run_nothing()
+    test_full_disk_refuses_to_start()
     print("ok")

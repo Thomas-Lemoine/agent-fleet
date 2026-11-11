@@ -18,7 +18,7 @@ Python stdlib only; every tool is a single file in `bin/`.
 | `claude-usage`, `codex-usage` | Live quota of every logged-in account. Neither one costs a model call. |
 | `codex` | Optional router that shadows the real `codex` on PATH and gives every `codex` call the account with the most weekly quota left. |
 | `codex_reset.py` | Shows an account's rate limits and reset credits. |
-| `pool_status.py` | Library: the pools write live progress to `~/.cache/hud/pools/<pid>.json` for dashboards. |
+| `pool_status.py` | Library: the pools write live progress to `~/.cache/hud/pools/<pid>.json` for dashboards, and it holds the disk floor the pools and `claude-auto` check before starting. |
 
 ## Install
 
@@ -60,6 +60,7 @@ claude_fleet.py prompts.jsonl --model opus --effort high --concurrency 16
 - **Failures:** every job ends as a row, and the exit code is 1 if any failed.
 - **Fake tool calls:** a Claude row whose answer holds a tool call written out as text (`<invoke name=...>`, which never ran) also carries `"fake_tool_call": true`.
 - **Out of quota:** exit 75 means every account ran out; re-run after the reset.
+- **Disk floor:** a pool refuses to start (exit 73) with less than 5 GB free where its results file goes, and so does `claude-auto` with less than 5 GB free in its working dir. A Claude pool whose `claude-auto` refuses mid-run stops the same way, leaving the unfinished jobs unrecorded. A full disk cuts results files short and fails every Bash call a Claude Code session makes. Nothing is deleted to make room.
 
 ## The skills
 
@@ -71,6 +72,7 @@ They read `~/.config/agent-fleet/local.md` if it exists. Put your own setup ther
 
 `plugin/` is a Claude Code plugin, `agent-fleet`:
 
+- **The `pkill -f` guard.** Denies a Bash (or Monitor) command where `pkill` appears with `-f`, `--full` or a cluster like `-9f` after it, in every session and subagent: bare, after `&&` or `;`, inside `ssh host '…'`, behind `sudo` or `xargs`. `pkill -f` matches whole command lines, so it kills its own shell and other sessions' processes that mention the pattern. The deny says to record `$!` or a pidfile at launch and kill that PID instead. `pgrep -f`, `pkill name`, and text handed to grep, sed, git or gh still run. It reads the command, not a script it runs.
 - **The hud.** Claude and codex quota per account, this machine's cpu, memory and disk (and one remote machine's), running pools, and the session's subagents. It draws as a band above the prompt, plus a pane (docked beside the transcript in the fullscreen TUI); `/hud` toggles the pane.
 - **`agent-fleet:astra` and `agent-fleet:sol`.** Haiku subagents that run a task through `codex_ask.sh` (GPT-6 Astra, GPT-6.1 Sol). Their descriptions tell Claude to use them only when you ask for that model by name, and they need a working codex login. The plugin hands the caller `codex_ask.sh`'s own output (the `PROMPT_FILE.out` it leaves; the relay's command runs as written, which auto mode needs) in place of the relay's message, or the relay's `CODEX FAILED:` line, so a relay cannot pass off its own answer as GPT's.
 

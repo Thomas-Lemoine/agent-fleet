@@ -29,7 +29,8 @@ others; if every account is dry
 the leftovers stay unrecorded, so re-running resumes them after the reset.
 "At capacity" and HTTP 429 turns are retried with backoff; anything else fails
 the job loudly in the results file. Workers are fresh read-only conversations
-with no shell unless --shell is given, so put the data in the prompt.
+with no shell unless --shell is given, so put the data in the prompt. With
+less than 5 GB free where results.jsonl goes, the pool refuses to start (exit 73).
 
 Measured 2026-09-06 (fan-out skill): ~50 MB per server + ~4.5 MB per thread;
 above ~50 concurrent per account the websocket path 403s and falls back to
@@ -37,7 +38,7 @@ HTTP, so turns still succeed but take 2-5x longer.
 """
 import argparse, collections, fcntl, glob, json, os, random, resource, subprocess, sys, threading, time, tomllib
 
-from pool_status import publish
+from pool_status import disk_floor, publish
 
 # The real binary, not the ~/.local/bin router: each server gets an explicit CODEX_HOME.
 # CODEX_BIN overrides the system codex (e.g. a newer private install a new model needs)
@@ -365,6 +366,7 @@ def main():
         sys.exit("prompt ids must be unique (resume and aggregation key on them)")
     if not jobs:
         print(f"nothing to do: all ids already ok in {out_path}"); return
+    disk_floor("codex_pool", os.path.dirname(os.path.abspath(out_path)))
     out = open(out_path, "a", buffering=1)
     log = open(os.path.splitext(out_path)[0] + ".log", "ab")
     out_lock = threading.Lock()
