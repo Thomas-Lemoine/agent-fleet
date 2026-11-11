@@ -2,8 +2,8 @@ import { expect, mock, test } from 'claude-code/testing'
 
 import type { HudSnapshot } from '../types'
 
-// A snapshot as collect.py writes it: account A hot on its 5h window, codex nearly dry, the
-// box unreachable, one codex pool halfway and a claude pool with 4 jobs in flight.
+// A snapshot as collect.py writes it: account A hot on its 5h window, codex nearly dry with d
+// logged out, the box unreachable, one codex pool halfway and a claude pool with 4 jobs in flight.
 const now = Date.now() / 1000
 const SNAP: HudSnapshot = {
   t: now,
@@ -23,7 +23,11 @@ const SNAP: HudSnapshot = {
     A: { t: now, five: 80, five_reset: now + 3600, week: 19, week_reset: now + 86400 * 3, fable: 11 },
     B: { t: now, five: 2, five_reset: now + 7200, week: 1, week_reset: now + 86400 * 5, fable: 0 },
   },
-  codex: { a: { t: now, week: 100, week_reset: now + 86400 }, b: { t: now, week: 97, week_reset: now + 86400 * 4 } },
+  codex: {
+    a: { t: now, week: 100, week_reset: now + 86400 },
+    b: { t: now, week: 97, week_reset: now + 86400 * 4 },
+    d: { t: now, error: 'logged out (401)' },
+  },
   codex_read: { t: now },
   sessions: [],
   archive: { t: now, name: 'archive', free: 1006, total: 1024 },
@@ -78,7 +82,7 @@ test('the band fits its width and the pane shows every section', { timeoutMs: 30
   const wide = await $.ui.mount(band(200))
   const wideText = (await wide.findAll({ type: 'Text' })).map(t => t.text).join('')
   expect(wideText).toContain('claude A')
-  expect(wideText).toContain('codex a 100 b 97')
+  expect(wideText).toContain('codex a 100 b 97 d ✕')
   expect(wideText).toContain('box ✕')
   expect(wideText).toContain('⇶ 60 agents') // 6 headless + 50 codex pool turns + 4 claude pool jobs
   await wide.unmount()
@@ -86,12 +90,12 @@ test('the band fits its width and the pane shows every section', { timeoutMs: 30
   const narrow = await $.ui.mount(band(40))
   const narrowText = (await narrow.findAll({ type: 'Text' })).map(t => t.text).join('')
   expect(narrowText).not.toContain('claude')
-  expect(narrowText).toContain('cx97') // tight tiers show the codex account with the most room
+  expect(narrowText).toContain('cx97') // tight tiers show the live codex account with the most room
   await narrow.unmount()
 
   for (const surface of ['terminal', 'desktop'] as const) {
     const text = (await rowsOf(await $.ui.mount(paneAt(surface, 52, 60)))).join('\n')
-    for (const part of ['Claude', 'Codex', 'mac', 'Fan-out', '100/200', 'disk 52G', 'archive 1006G free of 1024G', '✕ ssh: connect to host box']) {
+    for (const part of ['Claude', 'Codex', 'd ✕ logged out (401)', 'mac', 'Fan-out', '100/200', 'disk 52G', 'archive 1006G free of 1024G', '✕ ssh: connect to host box']) {
       expect(text).toContain(part)
     }
     expect(text).toContain('gpt-6-sol · in flight a 30 b 20') // room for each pool's detail row

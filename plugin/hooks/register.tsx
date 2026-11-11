@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { Elements, EngineInterface, FsStat, Register, RenderSurface, SessionRateLimit } from 'claude-code'
 
-import type { HudAgent, HudLimits, HudMachineStats, HudPool, HudSnapshot } from '../types'
+import type { HudAgent, HudCodexUsage, HudCodexWeek, HudLimits, HudMachineStats, HudPool, HudSnapshot } from '../types'
 import { relayGuard } from './relay'
 
 // The agent-fleet plugin: the hud below, and relayGuard (relay.ts) for the astra and sol agents.
@@ -31,7 +31,7 @@ const RETRY_MS = 60_000 // between collector runs while it is failing
 const BUSY = 75 // collect.py's exit while another session's collector holds the lock
 const TOAST_EVERY_MS = 15 * 60_000 // one toast per alert per this long, however it flaps
 
-const snap = atom({ plugin: 'agent-fleet', key: 'snap' } as const, null, { shape: 'v3' })
+const snap = atom({ plugin: 'agent-fleet', key: 'snap' } as const, null, { shape: 'v4' })
 const agents = atom({ plugin: 'agent-fleet', key: 'agents' } as const, [])
 const alerts = atom({ plugin: 'agent-fleet', key: 'alerts' } as const, {})
 const paneRev = atom({ plugin: 'agent-fleet', key: 'paneRev' } as const, 0)
@@ -96,6 +96,8 @@ const dur = (ms: number) => {
 const width = (line: Line) => line.reduce((n, s) => n + s.t.length, 0)
 
 const isUp = (m: HudSnapshot['machines'][string]): m is HudMachineStats => !('error' in m)
+const codexUp = (u: HudCodexUsage): u is HudCodexWeek => !('error' in u)
+const DEAD: Span = { t: '✕', c: COLOR.hot }
 
 const poolInflight = (p: HudPool) =>
   typeof p.inflight === 'number' ? p.inflight : Object.values(p.inflight).reduce((a, b) => a + b, 0)
@@ -139,15 +141,16 @@ function bandLine(s: HudSnapshot, me: string, n: number, tier: number): Line {
     out.push(SEP)
     if (tier === 0) {
       out.push(dim('codex '))
-      for (const [acct, u] of codex) out.push(dim(`${acct} `), num('week', u.week), dim(' '))
+      for (const [acct, u] of codex) out.push(dim(`${acct} `), codexUp(u) ? num('week', u.week) : DEAD, dim(' '))
       out.pop()
     } else if (tier === 1) {
       out.push(dim('cx '))
-      for (const [, u] of codex) out.push(num('week', u.week), dim('·'))
+      for (const [, u] of codex) out.push(codexUp(u) ? num('week', u.week) : DEAD, dim('·'))
       out.pop()
     } else {
       // Tight: only the account with the most room matters for routing.
-      out.push(dim('cx'), num('week', Math.min(...codex.map(([, u]) => u.week))))
+      const weeks = codex.map(([, u]) => u).filter(codexUp).map(u => u.week)
+      out.push(dim('cx'), weeks.length ? num('week', Math.min(...weeks)) : DEAD)
     }
   }
   for (const [name, m] of machines) {
@@ -224,14 +227,19 @@ function claudeRows(s: HudSnapshot, me: string, w: number): Line[] {
 }
 
 function codexRows(s: HudSnapshot, w: number): Line[] {
-  const failed: Line[] = s.codex_read?.error
-    ? [[{ t: 'Codex ', bold: true }, { t: `codex-usage failed: ${s.codex_read.error}`, c: COLOR.hot }]]
-    : []
-  return [...codexQuota(s, w), ...failed]
+  const all = Object.entries(s.codex)
+  const rows = codexQuota(all.filter((e): e is [string, HudCodexWeek] => codexUp(e[1])), w)
+  // An account codex-usage could not read gets no bar: a row per reason names the accounts.
+  const dead = new Map<string, string[]>()
+  for (const [a, u] of all) if (!codexUp(u)) dead.set(u.error, [...(dead.get(u.error) ?? []), a])
+  for (const [why, accts] of dead) {
+    rows.push([{ t: rows.length ? '      ' : 'Codex ', bold: true }, { t: `${accts.join(' ')} ✕ ${why}`, c: COLOR.hot }])
+  }
+  if (s.codex_read?.error) rows.push([{ t: 'Codex ', bold: true }, { t: `codex-usage failed: ${s.codex_read.error}`, c: COLOR.hot }])
+  return rows
 }
 
-function codexQuota(s: HudSnapshot, w: number): Line[] {
-  const codex = Object.entries(s.codex)
+function codexQuota(codex: [string, HudCodexWeek][], w: number): Line[] {
   if (!codex.length) return []
   const reset = dim(`  ↻ ${resetIn(Math.min(...codex.map(([, u]) => u.week_reset)), Date.now())}`)
   // Row: `Codex ` 6, per account `a ` + bar + 4-wide number + 2, the reset ~9.
@@ -563,7 +571,7 @@ const self = {
 // anew each tick, so every session gets turns: only one Ghostty launched reads Ghostty's tabs.
 const jitter = () => Math.floor(Math.random() * 3_000)
 
-const snapshotPath = () => `${self.home}/.cache/hud/snapshot-v3.json` // collect.py's SNAPSHOT
+const snapshotPath = () => `${self.home}/.cache/hud/snapshot-v4.json` // collect.py's SNAPSHOT
 
 /** This session's line in ~/.cache/hud/sessions, which other sessions' fan-out counts and the
  * collector's Claude quota read. */

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Self-check for codex_pool's scheduler: a dry account hands its jobs back
-and the others finish them, and pools share each account's slots. Fakes the
-app-server, so it runs anywhere:
+"""Self-check for codex_pool's scheduler: a dry account (usage limit or revoked
+login) hands its jobs back and the others finish them, and pools share each
+account's slots. Fakes the app-server, so it runs anywhere:
 
     uv run --no-project python tests/test_codex_pool.py
 """
@@ -10,6 +10,7 @@ import json, os, subprocess, sys, tempfile, threading, time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bin"))
 import codex_pool
 
+RealServer = codex_pool.Server  # the scheduler tests swap in FakeServer
 served, quota_hit = [], threading.Event()
 
 
@@ -25,7 +26,7 @@ class FakeServer:
     def run_turn(self, a, prompt, images=()):
         if self.home.endswith("dry"):
             quota_hit.set()
-            raise codex_pool.QuotaExhausted("You've hit your usage limit.")
+            raise codex_pool.AccountDry("You've hit your usage limit.")
         quota_hit.wait(5)
         served.append(prompt)
         return f"echo {prompt}", None
@@ -75,6 +76,23 @@ def test_dry_account_hands_back_its_jobs():
     assert sorted(r["id"] for r in rows) == sorted(str(i) for i in range(20)), rows
     assert all(r["ok"] for r in rows), rows
     assert sorted(served) == sorted(str(i) for i in range(20)), served  # the healthy home did every job once
+
+
+def test_revoked_login_is_a_dry_account():
+    """A revoked login's turn fails with a 401 (the message as codex 0.159 words it): the
+    account drops out as a dry one does, instead of failing the queue in seconds per job."""
+    srv = object.__new__(RealServer)
+    srv.home = "/h/.codex"
+    srv.request = lambda method, params, timeout: {"error": None, "result": {"thread": {"id": "t"}, "turn": {"id": "u"}}}
+    srv._wait_turn = lambda tid, timeout: {"status": "failed", "error": {
+        "message": "workspace routing discovery unauthorized (401)", "codexErrorInfo": "other"}}
+    a = type("A", (), {"timeout": 10, "model": "m", "cwd": "/", "effort": "low"})()
+    try:
+        srv.run_turn(a, "hi")
+    except codex_pool.AccountDry as e:
+        assert "CODEX_HOME=/h/.codex codex login" in str(e), e
+    else:
+        raise AssertionError("a 401 turn did not drop its account")
 
 
 def test_saturated_account_takes_no_jobs():
@@ -142,5 +160,6 @@ def test_slots_are_shared_and_die_with_their_process():
 if __name__ == "__main__":
     test_slots_are_shared_and_die_with_their_process()
     test_dry_account_hands_back_its_jobs()
+    test_revoked_login_is_a_dry_account()
     test_saturated_account_takes_no_jobs()
     print("ok")

@@ -23,8 +23,9 @@ seconds for its first slot while an incumbent sits at the cap), and a pool
 alone gets them all. A worker takes a job only once it holds a slot, so a busy
 account holds no job the others could run. Each server is restarted every
 --chunk jobs because finished ephemeral threads stay resident while the client
-is attached and cannot be deleted. An account that hits its usage limit drops
-out and its jobs go back to the queue for the others; if every account is dry
+is attached and cannot be deleted. An account that hits its usage limit, or
+whose login was revoked, drops out and its jobs go back to the queue for the
+others; if every account is dry
 the leftovers stay unrecorded, so re-running resumes them after the reset.
 "At capacity" and HTTP 429 turns are retried with backoff; anything else fails
 the job loudly in the results file. Workers are fresh read-only conversations
@@ -98,9 +99,10 @@ def retryable(err):
     return "capacity" in err.lower() or "429 Too Many Requests" in err or '"httpStatusCode": 429' in err
 
 
-class QuotaExhausted(Exception):
-    """The account behind this server is at its usage limit: the job is not
-    this job's fault, so it goes back to the queue for another account."""
+class AccountDry(Exception):
+    """The account behind this server can run no turn (at its usage limit, or
+    its login revoked): not this job's fault, so it goes back to the queue for
+    another account."""
 
 
 def mcp_servers(home):
@@ -282,7 +284,12 @@ class Server:
         if t["status"] != "completed":
             # v2 TurnError.codexErrorInfo is a plain string for this variant
             if t["error"].get("codexErrorInfo") == "usageLimitExceeded":
-                raise QuotaExhausted(t["error"]["message"])
+                raise AccountDry(t["error"]["message"])
+            # A revoked login fails every turn in seconds ("workspace routing discovery
+            # unauthorized (401)"), so left in, its worker would fail the queue while the
+            # live accounts are still on their first turns.
+            if t["error"].get("codexErrorInfo") == "unauthorized" or "(401)" in t["error"]["message"]:
+                raise AccountDry(f"{t['error']['message']} (log in again: CODEX_HOME={self.home} codex login --device-auth)")
             return None, f"turn {t['status']}: {json.dumps(t['error'])[:300]}"
         with self.lock:
             texts = self.msgs.get(tid) or [i["text"] or "" for i in t["items"] if i["type"] == "agentMessage"]
@@ -418,7 +425,7 @@ def main():
             for attempt in range(a.retries + 1):
                 try:
                     answer, err = srv.run_turn(a, job["prompt"], job.get("images", ()))
-                except QuotaExhausted as e:
+                except AccountDry as e:
                     with out_lock:
                         first = not dry.is_set(); dry.set()
                         todo.append(job)  # inflight drops in the finally below
