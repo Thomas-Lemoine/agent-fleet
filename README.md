@@ -72,7 +72,7 @@ They read `~/.config/agent-fleet/local.md` if it exists. Put your own setup ther
 `plugin/` is a Claude Code plugin, `agent-fleet`:
 
 - **The hud.** Claude and codex quota per account, this machine's cpu, memory and disk (and one remote machine's), running pools, and the session's subagents. It draws as a band above the prompt, plus a pane (docked beside the transcript in the fullscreen TUI); `/hud` toggles the pane.
-- **`agent-fleet:astra` and `agent-fleet:sol`.** Haiku subagents that run a task through `codex_ask.sh` (GPT-6 Astra, GPT-6.1 Sol). The plugin hands the caller `codex_ask.sh`'s own output (the `PROMPT_FILE.out` it leaves; the relay's command runs as written, which auto mode needs) in place of the relay's message, or the relay's `CODEX FAILED:` line, so a relay cannot pass off its own answer as GPT's.
+- **`agent-fleet:astra` and `agent-fleet:sol`.** Haiku subagents that run a task through `codex_ask.sh` (GPT-6 Astra, GPT-6.1 Sol). Their descriptions tell Claude to use them only when you ask for that model by name, and they need a working codex login. The plugin hands the caller `codex_ask.sh`'s own output (the `PROMPT_FILE.out` it leaves; the relay's command runs as written, which auto mode needs) in place of the relay's message, or the relay's `CODEX FAILED:` line, so a relay cannot pass off its own answer as GPT's.
 
 Run `install.sh` first: the plugin calls `codex_ask.sh` and `codex-usage` from PATH, and shows accounts with no live session from `claude-usage`'s `usage-probe.json`. Then, at a Claude Code prompt:
 

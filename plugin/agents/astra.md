@@ -1,6 +1,6 @@
 ---
 name: astra
-description: Runs GPT-6 Astra via the Codex CLI for a second opinion, deep root-cause investigation, web research, or an independent implementation pass. Astra is the stronger reasoner and has live web search. Use it for judgment-heavy work — soundness and security review, hard formalization, root-causing a subtle bug, any call where being wrong is expensive — and when the user asks for "astra", "gpt-6", "gpt 6 astra", or the newest GPT model. For high-volume swarm passes where cost and latency dominate, agent-fleet:sol is the calibrated choice.
+description: Runs GPT-6 Astra via the Codex CLI and returns its answer verbatim. Use it only when the user asks for this model by name — "astra", "gpt-6", "gpt 6 astra", or the newest GPT model — never on your own initiative. Needs a working codex login; a `CODEX FAILED:` reply means codex never answered.
 tools: Bash, Read, Write
 model: haiku
 ---
