@@ -52,7 +52,7 @@ ORCHESTRATE = ("I am asking you to run the workflow script at {path}: call the W
                "the prompts from the data scripts it names, each of which only returns a list of [index, "
                "prompt], and gives each prompt to one agent. When it completes, reply with the single word done.")
 # A tool call written out as text, which a worker's answer sometimes holds: it never ran.
-FAKE_TOOL_CALL = re.compile(r"</?(invoke|function_calls)\b")
+FAKE_TOOL_CALL = re.compile(r"</?(\w+:)?(invoke|function_calls)\b")
 # How the CLI words a spent account: "You've hit your limit", "hit your session limit", "You've
 # reached your Fable limit", "You're out of usage credits", "usage credit limit".
 LIMIT = re.compile(r"hit your (\w+ )?limit|reached your \w+ limit|out of usage credits|usage credit limit")
@@ -104,9 +104,9 @@ def run_session(chunk: list[dict], args, workdir: str, log: Path, record, live) 
     paths = []
     for i, part in enumerate(pack([(k, j["prompt"]) for k, j in enumerate(chunk)])):
         paths.append(os.path.join(d, f"prompts{i}.js"))
-        Path(paths[-1]).write_text(data_script(part))
+        Path(paths[-1]).write_text(data_script(part), encoding="utf-8")
     top = os.path.join(d, "fleet.js")
-    Path(top).write_text(fleet_script(paths, args.model, args.effort))
+    Path(top).write_text(fleet_script(paths, args.model, args.effort), encoding="utf-8")
     # The parent runs on the workers' model so claude-auto weighs the right limits (a Fable week).
     # Workers inherit the parent's tools, minus Read (the script disallows it).
     tools = "Workflow,Read" + (",WebSearch,WebFetch" if args.web else "")
@@ -202,13 +202,14 @@ def watch(proc, top, chunk, args, log, log_from, record, live) -> bool:
     reader.join(10)
 
     # Why agents failed: the run summary's per-agent errors, by label. The session writes the summary
-    # in place (truncate, then write) and has exited by now (claude-auto execs claude), so a summary
-    # that is empty or cut short stays that way: the session died mid-write. Its failed jobs say so.
+    # in place (truncate, then write, without waiting on it) and has exited by now (claude-auto execs
+    # claude), so a summary that is empty or cut short stays that way. Its failed jobs say so, and a
+    # usage limit that only an agent's error named goes unseen: those jobs fail and the fleet goes on.
     reasons, unread = {}, ""
     if seen["summary"] and os.path.exists(seen["summary"]):
         try:
-            progress = json.loads(Path(seen["summary"]).read_text()).get("workflowProgress", [])
-        except json.JSONDecodeError as e:
+            progress = json.loads(Path(seen["summary"]).read_text(encoding="utf-8")).get("workflowProgress", [])
+        except ValueError as e:  # bad JSON, or cut inside a UTF-8 character
             unread = f"no agent's error is known: the session left its run summary {seen['summary']} unparseable ({e})"
             print(f"  {unread}", flush=True)
             progress = []

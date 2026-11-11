@@ -33,7 +33,7 @@ from pool_status import publish
 
 STOP = threading.Event()  # set once every account is past its cutoff: no job starts after it
 # A tool call written out as text, which an answer sometimes holds: it never ran.
-FAKE_TOOL_CALL = re.compile(r"</?(invoke|function_calls)\b")
+FAKE_TOOL_CALL = re.compile(r"</?(\w+:)?(invoke|function_calls)\b")
 
 
 def answer_of(stdout: str) -> tuple[str | None, str]:
@@ -119,18 +119,21 @@ def main():
     # Rows are written as jobs finish, not in submission order, so a slow job holds back no other's
     # row and a run killed midway keeps every row it finished.
     with tempfile.TemporaryDirectory(prefix="claude_pool.") as cwd, ThreadPoolExecutor(args.concurrency) as ex:
-        for fut in as_completed([ex.submit(run_job, j, args, cwd) for j in todo]):
-            row = fut.result()
-            if row is None:  # not run, or cut off by the limit: a re-run picks it up
-                continue
-            with open(out, "a") as f:
-                f.write(json.dumps(row) + "\n")
-            n += 1
-            failed += not row["ok"]
-            faked += "fake_tool_call" in row
-            if n % 10 == 0 or not row["ok"]:
-                print(f"  {n}/{len(todo)} done, {failed} failed"
-                      + ("" if row["ok"] else f"  {row['id']}: {row['error'][:120]}"), flush=True)
+        try:
+            for fut in as_completed([ex.submit(run_job, j, args, cwd) for j in todo]):
+                row = fut.result()
+                if row is None:  # not run, or cut off by the limit: a re-run picks it up
+                    continue
+                with open(out, "a") as f:
+                    f.write(json.dumps(row) + "\n")
+                n += 1
+                failed += not row["ok"]
+                faked += "fake_tool_call" in row
+                if n % 10 == 0 or not row["ok"]:
+                    print(f"  {n}/{len(todo)} done, {failed} failed"
+                          + ("" if row["ok"] else f"  {row['id']}: {row['error'][:120]}"), flush=True)
+        finally:  # after an error or Ctrl-C, the queued jobs never start
+            ex.shutdown(cancel_futures=True)
     print(f"{n} jobs, {failed} failed -> {out}" + (", stopped: every account past its cutoff" if STOP.is_set() else "")
           + (f"; {faked} answers hold a tool call written as text (\"fake_tool_call\")" if faked else ""), flush=True)
     raise SystemExit(75 if STOP.is_set() else 1 if failed else 0)
