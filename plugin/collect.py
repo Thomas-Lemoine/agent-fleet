@@ -2,7 +2,7 @@
 """One snapshot of accounts, machines and fan-outs for the agent-fleet plugin's hud.
 
     collect.py [--ttl S] [--remote HOST] [--archive REMOTE]
-        refresh ~/.cache/hud/snapshot-v4.json unless it is under S seconds old; HOST is an ssh
+        refresh ~/.cache/hud/snapshot-v5.json unless it is under S seconds old; HOST is an ssh
         host shown as a second machine, REMOTE an sftp rclone remote whose free space is shown
     collect.py --machine
         print this machine's stats as one JSON line (the remote half, run over ssh)
@@ -41,7 +41,7 @@ HOME = os.path.expanduser("~")
 DIR = os.path.join(HOME, ".cache", "hud")
 # Renamed whenever its format changes: a session that hot-reloads a new mod must never parse the
 # file an old collector wrote moments before.
-SNAPSHOT = os.path.join(DIR, "snapshot-v4.json")
+SNAPSHOT = os.path.join(DIR, "snapshot-v5.json")
 HISTORY = 90  # samples kept per machine for the sparklines (~15 min at the 10 s TTL)
 SESSION_STALE = 120  # a session file not rewritten for this long is a session that is gone
 ARCHIVE_EVERY = 3600  # an archive's free space barely moves: one `rclone about` an hour
@@ -218,7 +218,7 @@ def claude_usage(prev, beats):
         except (FileNotFoundError, ValueError):
             continue
         if p["t"] > out.get(acct, {}).get("t", 0):
-            out[acct] = {k: p[k] for k in ("t", "five", "five_reset", "week", "week_reset", "fable")}
+            out[acct] = {k: p[k] for k in ("t", "week", "week_reset", "fable")}
     for b in beats:
         lim = b.get("limits")
         if lim and lim["t"] > out.get(b["acct"], {}).get("t", 0):
