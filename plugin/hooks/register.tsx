@@ -33,15 +33,15 @@ const RETRY_MS = 60_000 // between collector runs while it is failing
 const BUSY = 75 // collect.py's exit while another session's collector holds the lock
 const TOAST_EVERY_MS = 15 * 60_000 // one toast per alert per this long, however it flaps
 
-const snap = atom({ plugin: 'agent-fleet', key: 'snap' } as const, null, { shape: 'v4' })
+const snap = atom({ plugin: 'agent-fleet', key: 'snap' } as const, null, { shape: 'v5' })
 const agents = atom({ plugin: 'agent-fleet', key: 'agents' } as const, [])
 const alerts = atom({ plugin: 'agent-fleet', key: 'alerts' } as const, {})
 const paneRev = atom({ plugin: 'agent-fleet', key: 'paneRev' } as const, 0)
 const asked = atom({ plugin: 'agent-fleet', key: 'asked' } as const, false)
 
-// Higher is worse everywhere: quota used, cpu busy, memory used. [warn, hot] per meter; the
-// 5h hot line is the fan-out cutoff (quota skill), memory's 20% free.
-const LIMITS = { five: [50, 75], week: [85, 95], cpu: [70, 90], mem: [60, 80] } as const
+// Higher is worse everywhere: quota used, cpu busy, memory used. [warn, hot] per meter; memory's
+// hot line is 20% free.
+const LIMITS = { week: [85, 95], cpu: [70, 90], mem: [60, 80] } as const
 const COLOR = { bar: '#58a6ff', warn: '#d29922', hot: '#f85149', good: '#3fb950' } as const
 // Disk is free GB, lower is worse: a job writing a few GB fails under the hot line.
 const DISK = { warn: 20, hot: 5 } as const
@@ -133,8 +133,7 @@ function bandLine(s: HudSnapshot, me: string, n: number, tier: number): Line {
     if (tier === 0) out.push(dim('claude '))
     for (const [acct, u] of claude) {
       out.push({ t: acct, bold: acct === me, dim: acct !== me })
-      if (tier < 3) out.push(dim(tier < 2 ? ' ' : ''), num('five', u.five), dim('·'))
-      out.push(num('week', u.week), dim(' '))
+      out.push(dim(tier < 2 ? ' ' : ''), num('week', u.week), dim(' '))
     }
     out.pop()
   }
@@ -196,30 +195,25 @@ function claudeRows(s: HudSnapshot, me: string, w: number): Line[] {
   const now = Date.now()
   const accts = Object.entries(s.claude)
   if (!accts.length) return []
-  // Row: label 4, two bars with 4-wide numbers, the two resets (8, 7), fable (7).
-  const resets = w >= 37
-  const fable = w >= 52 && accts.some(([, u]) => u.fable != null)
-  const bw = clamp((w - 14 - (resets ? 15 : 0) - (fable ? 7 : 0)) / 2, 4, 16)
+  // Row: label 4, the week's bar with its 4-wide number, its reset (7), fable (7).
+  const resets = w >= 23
+  const fable = w >= 30 && accts.some(([, u]) => u.fable != null)
+  const bw = clamp(w - 8 - (resets ? 7 : 0) - (fable ? 7 : 0), 4, 20)
   // Each label ends over the column it names.
   const out: Line[] = [
     [
       { t: 'Claude', bold: true },
-      dim(
-        `${'5h'.padStart(bw + 2)}${'week'.padStart(bw + 6)}${resets ? `${'↻5h'.padStart(8)}${'↻wk'.padStart(7)}` : ''}${fable ? '  fable' : ''}`,
-      ),
+      dim(`${'week'.padStart(bw + 2)}${resets ? '↻wk'.padStart(7) : ''}${fable ? '  fable' : ''}`),
     ],
   ]
   for (const [acct, u] of accts) {
     const mine = acct === me
     const row: Line = [
       { t: (mine ? `${acct}●` : acct).padEnd(4), bold: mine },
-      ...bar('five', u.five, bw),
-      num('five', u.five, 4),
-      dim('  '),
       ...bar('week', u.week, bw),
       num('week', u.week, 4),
     ]
-    if (resets) row.push(dim(`${resetIn(u.five_reset, now).padStart(8)}${resetIn(u.week_reset, now).padStart(7)}`))
+    if (resets) row.push(dim(resetIn(u.week_reset, now).padStart(7)))
     if (fable) row.push(dim(u.fable == null ? '       ' : String(Math.round(u.fable)).padStart(7)))
     out.push(row)
     // The row fills the width, so a stale reading says so on a row of its own.
@@ -573,7 +567,7 @@ const self = {
 // anew each tick, so every session gets turns: only one Ghostty launched reads Ghostty's tabs.
 const jitter = () => Math.floor(Math.random() * 3_000)
 
-const snapshotPath = () => `${self.home}/.cache/hud/snapshot-v4.json` // collect.py's SNAPSHOT
+const snapshotPath = () => `${self.home}/.cache/hud/snapshot-v5.json` // collect.py's SNAPSHOT
 
 /** This session's line in ~/.cache/hud/sessions, which other sessions' fan-out counts and the
  * collector's Claude quota read. */
@@ -587,14 +581,12 @@ async function beat($: EngineInterface) {
   )
 }
 
-/** The 5-hour and weekly windows of a measurement as the snapshot spells a reading, or null
- * when either is missing (off a subscription, before the first response). */
+/** The weekly window of a measurement as the snapshot spells a reading, or null when it is
+ * missing (off a subscription, before the first response). */
 function toLimits(rateLimits: SessionRateLimit[]): HudLimits | null {
-  const five = rateLimits.find(r => r.kind === 'five_hour')
   const week = rateLimits.find(r => r.kind === 'seven_day')
-  if (!five || !week) return null
-  const at = (iso?: string) => (iso ? Date.parse(iso) / 1000 : null)
-  return { t: Date.now() / 1000, five: five.percentUsed, five_reset: at(five.resetsAt), week: week.percentUsed, week_reset: at(week.resetsAt) }
+  if (!week) return null
+  return { t: Date.now() / 1000, week: week.percentUsed, week_reset: week.resetsAt ? Date.parse(week.resetsAt) / 1000 : null }
 }
 
 /** Hides the unasked pane while another session in the Ghostty tab shows the hud, and brings
@@ -763,7 +755,7 @@ export const register: Register = (on, options) => {
   // headless run beats only once it has agents (dozens of pool jobs would churn files).
   on('session.measure', async ($, e, next) => {
     const limits = toLimits(e.rateLimits)
-    const moved = limits && (limits.five !== self.limits?.five || limits.week !== self.limits?.week)
+    const moved = limits && limits.week !== self.limits?.week
     if (limits) self.limits = limits
     if (moved && self.sid && (!self.headless || self.lastBeat)) await beat($)
     return next(e)

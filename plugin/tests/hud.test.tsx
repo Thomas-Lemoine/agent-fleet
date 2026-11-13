@@ -2,8 +2,8 @@ import { expect, mock, test } from 'claude-code/testing'
 
 import type { HudSnapshot } from '../types'
 
-// A snapshot as collect.py writes it: account A hot on its 5h window, codex nearly dry with d
-// logged out, the box unreachable, one codex pool halfway and a claude pool with 4 jobs in flight.
+// A snapshot as collect.py writes it: account A hot on its week, codex nearly dry with d logged
+// out, the box unreachable, one codex pool halfway and a claude pool with 4 jobs in flight.
 const now = Date.now() / 1000
 const SNAP: HudSnapshot = {
   t: now,
@@ -20,8 +20,8 @@ const SNAP: HudSnapshot = {
     box: { error: 'ssh: connect to host box port 22: Operation timed out' },
   },
   claude: {
-    A: { t: now, five: 80, five_reset: now + 3600, week: 19, week_reset: now + 86400 * 3, fable: 11 },
-    B: { t: now, five: 2, five_reset: now + 7200, week: 1, week_reset: now + 86400 * 5, fable: 0 },
+    A: { t: now, week: 96, week_reset: now + 86400 * 3, fable: 11 },
+    B: { t: now, week: 1, week_reset: now + 86400 * 5, fable: 0 },
   },
   codex: {
     a: { t: now, week: 100, week_reset: now + 86400 },
@@ -58,7 +58,7 @@ const band = (bodyColumns: number) => ({
   plugin: 'agent-fleet',
   surface: 'terminal' as const,
   component: 'AbovePrompt' as const,
-  props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns, scroll: { offset: 0, bodyRows: 10 }, view: {} },
+  props: { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 10, bodyColumns, scroll: { offset: 0, bodyRows: 10 }, view: {} },
 })
 
 test('the band fits its width and the pane shows every section', { timeoutMs: 30_000 }, async ($, on) => {
@@ -167,4 +167,39 @@ test('a stalled local reading shows its error and keeps the pools it read withou
 
   const pane = (await rowsOf(await $.ui.mount(paneAt('terminal', 52, 60)))).join('\n')
   for (const part of ['✕ RuntimeError: ps timed out after 10s', '100/200', 'Claude']) expect(pane).toContain(part)
+})
+
+test("a measurement's weekly window reaches the session's beat", async ($, on) => {
+  mock.env(on, { HOME: '/h' })
+  mock.store(on)
+  const clock = mock.clock(on, { now: Date.now() })
+  on('command.register', () => ({ value: { command: 'hud' } }))
+  on('ui.panes', () => ({ value: [] }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  on('session.id', () => ({ value: 'sid-1' }))
+  on('session.cwd', () => ({ value: '/h/dotfiles' }))
+  on('settings.read', () => ({ value: {} }))
+  on('fs.stat', () => ({ value: { kind: 'file', size: 1, mtimeMs: Date.now(), isLink: false } }))
+  on('fs.read', () => ({ value: JSON.stringify(SNAP) }))
+  const beats: string[] = []
+  on('fs.write', (_$, e) => {
+    if (e.path === '/h/.cache/hud/sessions/sid-1.json') beats.push(e.text)
+    return { value: undefined }
+  })
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  on('session.measure', (_$, e) => ({ changed: e.changed }))
+  await $.session.start({ cwd: '/h/dotfiles', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+
+  // Claude reports only the week: there is no 5-hour window to wait for.
+  const resetsAt = '2026-11-15T16:00:00.000Z'
+  await $.session.measure({
+    context: { window: 200_000 },
+    rateLimits: [{ kind: 'seven_day', percentUsed: 42, resetsAt }],
+    changed: ['rateLimits'],
+  })
+  const last = beats.at(-1)
+  if (!last) throw new Error('the measurement wrote no beat')
+  expect(JSON.parse(last).limits).toMatchObject({ week: 42, week_reset: Date.parse(resetsAt) / 1000 })
 })

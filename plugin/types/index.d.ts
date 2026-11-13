@@ -1,4 +1,4 @@
-// What collect.py writes to ~/.cache/hud/snapshot-v4.json, and the session's own subagents.
+// What collect.py writes to ~/.cache/hud/snapshot-v5.json, and the session's own subagents.
 
 export type HudPool = {
   pid: number
@@ -41,12 +41,10 @@ export type HudMachineStats = {
  * pools are still read, as they need no ps). */
 export type HudMachine = HudMachineStats | { error: string; pools?: HudPool[] }
 
-/** One account's 5-hour and weekly windows: used %, and resets as epoch s (null while a window
- * has not started). */
+/** One account's weekly window: used %, and its reset as epoch s (null while the window has not
+ * started). Claude has no 5-hour window since 2026-11. */
 export type HudLimits = {
   t: number
-  five: number
-  five_reset: number | null
   week: number
   week_reset: number | null
 }
