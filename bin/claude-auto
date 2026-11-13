@@ -3,8 +3,8 @@
 
     claude-auto [claude args...]      pick an account, exec `claude` with CLAUDE_CONFIG_DIR set
     claude-auto --which [args...]     print the table and the pick for these args, launch nothing
-    claude-auto --strict [args...]    for lanes: spend 5-hour windows to 98%, and exit 75 instead of
-                                      falling back when every account is past 98% of a window
+    claude-auto --strict [args...]    for lanes: exit 75 instead of falling back when every
+                                      account is past 98% of its week
     claude-auto --selftest
 
 Accounts are ~/.claude (A) and every one-letter ~/.claude-<x> dir (~/.claude-b is B); one counts once
@@ -12,16 +12,14 @@ Accounts are ~/.claude (A) and every one-letter ~/.claude-<x> dir (~/.claude-b i
 `CLAUDE_CONFIG_DIR=~/.claude-b claude` and /login. CLAUDE_AUTO_ONLY=B,C limits the pick to those.
 Usage is the newer of the account's last-statusline.json (written by a statusline that saves its
 input there; see the README) and its usage-probe.json (claude-usage, run from cron on each
-machine), so it is at most one cron interval old whichever machine spent it. A window whose
-resets_at has passed counts as 0% used.
+machine), so it is at most one cron interval old whichever machine spent it. A week whose
+resets_at has passed counts as 0% used. Claude has had no 5-hour window since 2026-11.
 
-Pick: skip accounts at >= 98% of the week, or >= 75% of the 5-hour window for an interactive
-session (it would soon be cut off; lanes and accounts within 2 h of their weekly reset go to 98%),
-then take the highest score: weekly % left / hours until the weekly reset,
-times the share of the 5-hour window left. An account whose week resets soon with allowance
-unspent wins by a lot (that allowance is lost otherwise); a busy 5-hour window pulls it down.
-When every account is past a cutoff, take the one with the most room in its tightest limit
-instead; refuse only when every account is at 100% of one.
+Pick: skip accounts at >= 98% of the week (for a Fable session, the higher of the overall and
+Fable weeks), then take the highest score: weekly % left / hours until the weekly reset. An
+account whose week resets soon with allowance unspent wins by a lot (that allowance is lost
+otherwise). When every account is past the cutoff, take the one with the most of its week left
+instead; refuse only when every account is at 100%.
 
 Launching also needs 5 GB free on the working dir's filesystem (pool_status.disk_floor): below
 that, claude-auto exits 73 with one line on stderr and starts nothing.
@@ -51,13 +49,8 @@ def accounts(home: Path) -> dict[str, Path]:
 
 
 ACCOUNTS = accounts(HOME)
-# An interactive session started past 75% of a 5-hour window would soon be cut off mid-task, so it goes
-# elsewhere when it can (CLAUDE_AUTO_FIVE_MAX moves that line). Lanes (--strict) resume after a cut-off,
-# and within RESET_SOON_H of an account's weekly reset its unspent week is lost anyway: both spend the
-# window to FIVE_SPEND. The weekly line is the same for both.
-FIVE_MAX, FIVE_SPEND, WEEK_MAX = int(os.environ.get("CLAUDE_AUTO_FIVE_MAX", "75")), 98, 98
-RESET_SOON_H = 2
-STRICT_EXIT = 75  # exit code of --strict when every account is past a cutoff
+WEEK_MAX = 98  # past this % of its week, an account is picked only when none has room
+STRICT_EXIT = 75  # exit code of --strict when every account is past WEEK_MAX
 
 
 def logged_in(acct: str, d: Path) -> bool:
@@ -66,30 +59,23 @@ def logged_in(acct: str, d: Path) -> bool:
 
 
 def usage(d: Path, now: float) -> dict:
-    """{'five','week','week_reset','seen'} from the newer of the account's last statusline input
+    """{'week','week_reset','fable','seen'} from the newer of the account's last statusline input
     and its last claude-usage probe."""
     sl, pr = d / "last-statusline.json", d / "usage-probe.json"
-    windows = {}
-    if pr.exists() and (not sl.exists() or pr.stat().st_mtime >= sl.stat().st_mtime):
-        p = json.loads(pr.read_text())
-        windows = {"five_hour": (p["five"], p["five_reset"]), "seven_day": (p["week"], p["week_reset"])}
-    elif sl.exists():
-        rl = json.loads(sl.read_text()).get("rate_limits") or {}
-        windows = {k: ((rl.get(k) or {}).get("used_percentage"), (rl.get(k) or {}).get("resets_at"))
-                   for k in ("five_hour", "seven_day")}
-
-    def window(key: str, length: float) -> tuple[float, float]:
-        used, reset = windows.get(key, (None, None))
-        if used is None or reset is None or reset <= now:
-            return 0.0, now + length
-        return float(used), float(reset)
-
-    five, _ = window("five_hour", 5 * 3600)
-    week, week_reset = window("seven_day", 7 * 86400)
-    # The Fable week (a separate cap) comes only from the probe; the statusline does not carry it.
     p = json.loads(pr.read_text()) if pr.exists() else {}
+    used = reset = None
+    if pr.exists() and (not sl.exists() or pr.stat().st_mtime >= sl.stat().st_mtime):
+        used, reset = p["week"], p["week_reset"]
+    elif sl.exists():
+        w = (json.loads(sl.read_text()).get("rate_limits") or {}).get("seven_day") or {}
+        used, reset = w.get("used_percentage"), w.get("resets_at")
+    if used is None or reset is None or reset <= now:
+        week, week_reset = 0.0, now + 7 * 86400
+    else:
+        week, week_reset = float(used), float(reset)
+    # The Fable week (a separate cap) comes only from the probe; the statusline does not carry it.
     fable = p.get("fable") if (p.get("fable_reset") or 0) > now else (0.0 if p.get("fable") is not None else None)
-    return {"five": five, "week": week, "week_reset": week_reset, "fable": fable, "seen": bool(windows)}
+    return {"week": week, "week_reset": week_reset, "fable": fable, "seen": pr.exists() or sl.exists()}
 
 
 def weekly(u: dict, fable: bool) -> float:
@@ -98,27 +84,20 @@ def weekly(u: dict, fable: bool) -> float:
 
 
 def score(u: dict, now: float, fable: bool = False) -> float:
-    """Weekly % left per hour until the weekly reset (an account resetting soon has allowance that
-    is about to be lost, so it scores high), times the share of the 5-hour window left (a session
-    started near the 5-hour cap gets cut off mid-task and loses its prompt cache)."""
-    left = (100 - weekly(u, fable)) / max((u["week_reset"] - now) / 3600, 1)
-    return left if reset_soon(u, now) else left * (1 - u["five"] / 100)
-
-
-def reset_soon(u: dict, now: float) -> bool:
-    return u["week_reset"] - now < RESET_SOON_H * 3600
+    """Weekly % left per hour until the weekly reset: an account resetting soon has allowance that
+    is about to be lost, so it scores high."""
+    return (100 - weekly(u, fable)) / max((u["week_reset"] - now) / 3600, 1)
 
 
 def pick(table: dict, now: float, fable: bool = False, strict: bool = False) -> str:
-    ok = [a for a, u in table.items() if weekly(u, fable) < WEEK_MAX
-          and u["five"] < (FIVE_SPEND if strict or reset_soon(u, now) else FIVE_MAX)]
+    ok = [a for a, u in table.items() if weekly(u, fable) < WEEK_MAX]
     if ok:
-        return max(ok, key=lambda a: (score(table[a], now, fable), -table[a]["five"]))
+        return max(ok, key=lambda a: score(table[a], now, fable))
     if strict:
         raise SystemExit(STRICT_EXIT)
-    # Every account is past a cutoff: take the one with the most room in its tightest limit
-    # (score breaks ties), and refuse only when every account is fully spent.
-    left = {a: min(100 - u["five"], 100 - weekly(u, fable)) for a, u in table.items()}
+    # Every account is past the cutoff: take the one with the most of its week left (score breaks
+    # ties), and refuse only when every account is fully spent.
+    left = {a: 100 - weekly(u, fable) for a, u in table.items()}
     usable = [a for a in table if left[a] > 0]
     if not usable:
         raise SystemExit("claude-auto: every account is out of usage:\n" + render(table, now))
@@ -129,7 +108,7 @@ def render(table: dict, now: float) -> str:
     rows = []
     for a, u in table.items():
         fable = "-" if u["fable"] is None else f"{u['fable']:.0f}%"
-        rows.append(f"  {a}: 5h {u['five']:.0f}%  week {u['week']:.0f}%  Fable {fable}  "
+        rows.append(f"  {a}: week {u['week']:.0f}%  Fable {fable}  "
                     f"(resets in {(u['week_reset'] - now) / 3600:.0f} h)  score {score(u, now):.2f}"
                     + ("" if u["seen"] else "  (no reading yet)"))
     return "\n".join(rows)
@@ -175,33 +154,26 @@ def selftest():
         (home / ".claude-d").touch()  # a file, not a config dir
         assert accounts(home) == {"A": home / ".claude", "B": home / ".claude-b", "C": home / ".claude-c"}
     now = 1_000_000.0
-    t = {"A": {"five": 10, "week": 60, "week_reset": now + 24 * 3600, "seen": True},   # 40/24 = 1.67
-         "B": {"five": 95, "week": 0, "week_reset": now + 100 * 3600, "seen": True},   # 5h-blocked
-         "C": {"five": 0, "week": 20, "week_reset": now + 160 * 3600, "seen": True}}   # 80/160 = 0.5
-    # A: 40/24 * 0.9 = 1.5; B is over the 5-hour cutoff
+    t = {"A": {"week": 60, "week_reset": now + 24 * 3600, "seen": True},   # 40/24 = 1.67
+         "B": {"week": 0, "week_reset": now + 100 * 3600, "seen": True},   # 100/100 = 1
+         "C": {"week": 20, "week_reset": now + 160 * 3600, "seen": True}}  # 80/160 = 0.5
     for u in t.values():
         u["fable"] = None
     assert pick(t, now) == "A", pick(t, now)
-    t["A"]["fable"] = 99  # A's Fable week is spent: a Fable session goes to C, others still to A
-    assert pick(t, now, fable=True) == "C" and pick(t, now) == "A"
+    t["A"]["fable"] = 99  # A's Fable week is spent: a Fable session goes to B, others still to A
+    assert pick(t, now, fable=True) == "B" and pick(t, now) == "A"
     t["A"]["week"] = 99
-    assert pick(t, now) == "C"
-    # All past a session's cutoff: A has 1% of its week, B 5% of its 5h, C 10% of its 5h -> C
-    t["C"]["five"] = 90
-    assert pick(t, now) == "C", pick(t, now)
-    # A lane still spends B and C to 98% of their 5-hour windows; A's week is gone
-    assert pick(t, now, strict=True) in ("B", "C"), pick(t, now, strict=True)
-    t["B"]["five"], t["C"]["five"] = 98, 99
+    assert pick(t, now) == "B"
+    # All past the cutoff: A has 1% of its week left, B 2%, C 0.5% -> B; a lane stops instead
+    t["B"]["week"], t["C"]["week"] = 98, 99.5
+    assert pick(t, now) == "B", pick(t, now)
     try:
         pick(t, now, strict=True)
         raise AssertionError("--strict fell back")
     except SystemExit as e:
         assert e.code == STRICT_EXIT
-    # Within 2 h of its weekly reset, an interactive session also spends a window past 75%
-    t2 = {"B": {"five": 85, "week": 79, "week_reset": now + 1.5 * 3600, "seen": True, "fable": None}}
-    assert pick(t2, now) == "B"
     for u in t.values():  # all spent
-        u["five"] = 100
+        u["week"] = 100
     try:
         pick(t, now)
         raise AssertionError("picked a spent account")

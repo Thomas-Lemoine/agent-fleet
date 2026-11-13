@@ -14,7 +14,7 @@ Python stdlib only; every tool is a single file in `bin/`.
 | `claude_fleet.py` | The Claude version: each chunk of 100 prompts is one headless Claude Code session running a Workflow, so one ~400 MB process does what would otherwise be 100 `claude -p` processes of ~250 MB each. Workers get no tools (web search with `--web`). |
 | `claude_pool.py` | Same files, one `claude -p` per job. Use it for what the fleet cannot do: images, read access to a directory (`--read`), or crash isolation. |
 | `codex_ask.sh` | One `codex exec` turn that fails loudly (`CODEX FAILED: …`) instead of returning an empty or truncated answer, and leaves its whole stdout in `PROMPT_FILE.out`. For agents that relay a second opinion. |
-| `claude-auto` | Starts `claude` on the Claude account with the most usage to spare, based on its 5-hour and weekly windows. `--strict` exits 75 when every account is past its cutoff, so lanes stop instead of burning a window. |
+| `claude-auto` | Starts `claude` on the Claude account with the most usage to spare, based on its weekly window (and Fable week, for a Fable session). `--strict` exits 75 when every account is past its cutoff, so lanes stop instead of burning a week. |
 | `claude-usage`, `codex-usage` | Live quota of every logged-in account. Neither one costs a model call. |
 | `codex` | Optional router that shadows the real `codex` on PATH and gives every `codex` call the account with the most weekly quota left. |
 | `codex_reset.py` | Shows an account's rate limits and reset credits. |
