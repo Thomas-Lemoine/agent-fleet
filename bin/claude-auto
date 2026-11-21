@@ -60,15 +60,19 @@ def logged_in(acct: str, d: Path) -> bool:
 
 def usage(d: Path, now: float) -> dict:
     """{'week','week_reset','fable','seen'} from the newer of the account's last statusline input
-    and its last claude-usage probe."""
+    and its last claude-usage probe. A statusline input with no weekly reading (a session that has
+    not had a response yet) never hides the probe's: it would read as an unspent week."""
     sl, pr = d / "last-statusline.json", d / "usage-probe.json"
     p = json.loads(pr.read_text()) if pr.exists() else {}
-    used = reset = None
-    if pr.exists() and (not sl.exists() or pr.stat().st_mtime >= sl.stat().st_mtime):
-        used, reset = p["week"], p["week_reset"]
-    elif sl.exists():
+    w = {}
+    if sl.exists() and (not pr.exists() or sl.stat().st_mtime > pr.stat().st_mtime):
         w = (json.loads(sl.read_text()).get("rate_limits") or {}).get("seven_day") or {}
-        used, reset = w.get("used_percentage"), w.get("resets_at")
+    if w.get("used_percentage") is not None:
+        used, reset = w["used_percentage"], w.get("resets_at")
+    elif p:
+        used, reset = p["week"], p["week_reset"]
+    else:
+        used = reset = None
     if used is None or reset is None or reset <= now:
         week, week_reset = 0.0, now + 7 * 86400
     else:
@@ -153,6 +157,15 @@ def selftest():
             (home / d).mkdir()
         (home / ".claude-d").touch()  # a file, not a config dir
         assert accounts(home) == {"A": home / ".claude", "B": home / ".claude-b", "C": home / ".claude-c"}
+        # A newer statusline input wins only once it carries a weekly reading.
+        b = home / ".claude-b"
+        (b / "usage-probe.json").write_text(json.dumps({"t": 1, "week": 99, "week_reset": 2e9, "fable": None}))
+        os.utime(b / "usage-probe.json", (1, 1))
+        (b / "last-statusline.json").write_text(json.dumps({"rate_limits": {}}))
+        assert usage(b, 1e9)["week"] == 99, usage(b, 1e9)
+        (b / "last-statusline.json").write_text(json.dumps(
+            {"rate_limits": {"seven_day": {"used_percentage": 40, "resets_at": 2e9}}}))
+        assert usage(b, 1e9)["week"] == 40, usage(b, 1e9)
     now = 1_000_000.0
     t = {"A": {"week": 60, "week_reset": now + 24 * 3600, "seen": True},   # 40/24 = 1.67
          "B": {"week": 0, "week_reset": now + 100 * 3600, "seen": True},   # 100/100 = 1
