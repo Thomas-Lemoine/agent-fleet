@@ -18,8 +18,8 @@ gives it WebSearch and WebFetch, no MCP servers, no session file, and no
 CLAUDE.md, which keeps its context near 4k tokens. claude-auto picks the
 account with the most room per job; exit 75 means every account is past its
 cutoff, and then the whole pool stops (exit 75) instead of waiting: a pool that
-sleeps until the 5-hour window resets spends each new window the moment it opens
-and once ate an account's whole week in a day. Re-run to resume.
+sleeps until an account frees up spends its quota the moment it comes back, and
+once ate an account's whole week in a day. Re-run to resume.
 Anything else that yields no answer fails the job loudly in the results file.
 With less than 5 GB free where results.jsonl goes, the pool refuses to start
 (exit 73); when claude-auto refuses a job at that floor mid-run, the pool stops

@@ -16,7 +16,7 @@ claude_fleet.publish = lambda *a, **k: None  # no hud status files from tests
 # Plays a session: finds the jobs through the scripts the fleet wrote, then journals each agent.
 # Prompts: "boom" fails its agent, "noid" fails it before it starts (agentId ""), "slow" writes its
 # line in two halves across a poll, "limit" makes the account run out there (a rejected rate limit
-# event; "limit5h" a typed one, then a concurrent-request cap refusal), "spent" fails its agent with
+# event; "limitwk" a typed one, then a concurrent-request cap refusal), "spent" fails its agent with
 # the CLI's limit message and nothing else, "busy" fails it with the cap's words after the
 # account's concurrent-request cap refused a request, "fake" answers after a tool call written as
 # text. Afterwards a relaunch answers every job again in a second journal, which the fleet must
@@ -53,10 +53,10 @@ def journal():
 
 j, progress = journal(), []
 for k, prompt in jobs:
-    if prompt in ("limit", "limit5h"):
+    if prompt in ("limit", "limitwk"):
         say({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected",
-             **({"rateLimitType": "five_hour"} if prompt == "limit5h" else {})}})
-        if prompt == "limit5h":
+             **({"rateLimitType": "seven_day"} if prompt == "limitwk" else {})}})
+        if prompt == "limitwk":
             say({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "rateLimitType": "concurrents"}})
         break
     if prompt == "busy":
@@ -144,7 +144,7 @@ def test_concurrent_cap_is_not_a_usage_limit():
         assert "concurrent requests" in rows[1]["error"], rows  # failures are written as a session ends
 
     # The cap does not hide the account running out in the same session, typed or only in words.
-    for out in ("limit5h", "spent"):
+    for out in ("limitwk", "spent"):
         with tempfile.TemporaryDirectory() as d:
             setup(d)
             code, rows = run(d, [("a", "busy"), ("b", out), ("c", "x")])

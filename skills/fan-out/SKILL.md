@@ -12,11 +12,10 @@ operator's own layer: which model gets which task, the machines available
 (an always-on server, rentable burst machines), account names and house
 rules. Where it disagrees with this file, it wins.
 
-Both vendors are subscriptions with finite quota: Claude accounts have
-5-hour windows that reset within hours plus a weekly cap; codex accounts
-have a weekly cap reset on a fixed day. Check both with the `quota` skill
-before any wide run, and spend whichever has room. When codex is tight,
-Claude is usually the better spend because its windows come back soonest.
+Both vendors are subscriptions with finite quota: every Claude and codex
+account has a weekly cap reset on a fixed day (Claude dropped its 5-hour
+window in 2026-11). Check both with the `quota` skill before any wide run,
+and spend whichever has room, nearest reset first.
 Codex numbers below were measured 2026-09-06 with codex 0.153.2; Claude
 fleet numbers 2026-09-25 to 2026-10-15 on Claude Code 2.x.
 
@@ -136,16 +135,15 @@ claude_fleet.py prompts.jsonl --model opus --effort high --concurrency 16
   already do this.
 - **`--bare` does not work with subscriptions:** it reads only
   `ANTHROPIC_API_KEY`, never OAuth.
-- **Never wrap a Claude lane in anything that relaunches at the 5-hour
-  reset:** that spends each new window the moment it opens and can burn an
+- **Never wrap a Claude lane in anything that relaunches when an account
+  frees up:** that spends quota the moment it comes back and once burned an
   account's whole week in a day.
 
 `claude_pool.py prompts.jsonl --model opus --effort high [--web] [--read DIR]
 --concurrency 8` is the one-process-per-job fallback: each job is one
 `claude-auto --strict -p` from an empty cwd with no tools (WebSearch/WebFetch
 with `--web`, Read under `--read`), no MCP, no CLAUDE.md: ~4k tokens of
-context, ~250 MB. One Opus web list writer cost ~0.7% of an account's
-5-hour window and ~0.1% of its week.
+context, ~250 MB. One Opus web list writer cost ~0.1% of an account's week.
 
 ### A fleet by hand
 
