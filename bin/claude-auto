@@ -67,8 +67,8 @@ def usage(d: Path, now: float) -> dict:
     w = {}
     if sl.exists() and (not pr.exists() or sl.stat().st_mtime > pr.stat().st_mtime):
         w = (json.loads(sl.read_text()).get("rate_limits") or {}).get("seven_day") or {}
-    if w.get("used_percentage") is not None:
-        used, reset = w["used_percentage"], w.get("resets_at")
+    if w.get("used_percentage") is not None and w.get("resets_at") is not None:
+        used, reset = w["used_percentage"], w["resets_at"]
     elif p:
         used, reset = p["week"], p["week_reset"]
     else:
